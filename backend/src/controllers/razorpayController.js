@@ -120,34 +120,42 @@ const verifyAndSignup = async (req, res, next) => {
     if (!razorpay_subscription_id) {
       return res.status(400).json({ success: false, message: "Missing Razorpay subscription ID." });
     }
-    if (!companyName || !adminName || !email || !password) {
-      return res.status(400).json({ success: false, message: "All signup fields are required." });
+    // For existing users activating subscription from Settings, password field is not re-validated
+    const isExistingUserFlow = password === "__existing_user__";
+
+    if (!companyName || !adminName || !email) {
+      return res.status(400).json({ success: false, message: "Company name, admin name, and email are required." });
     }
-    if (password.length < 8) {
+    if (!isExistingUserFlow && password.length < 8) {
       return res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
     }
 
-    // ── Verify with Razorpay API (server-to-server — cannot be faked) ──
-    // Acceptable statuses after checkout: created, authenticated, active
-    // "created"       — subscription set up, start_at in future (trial flow)
-    // "authenticated" — mandate authorised, first charge pending
-    // "active"        — first charge succeeded
+    // ── Verify subscription with Razorpay API (server-to-server — cannot be faked) ──
     let rzpSub;
     try {
       rzpSub = await getRazorpay().subscriptions.fetch(razorpay_subscription_id);
     } catch (e) {
-      return res.status(400).json({ success: false, message: "Could not verify subscription with Razorpay." });
+      // Surface the actual Razorpay error (e.g. "Authentication failed" = wrong API key)
+      const detail = e?.error?.description || e?.error?.error?.description || e?.message || "Unknown error";
+      console.error("[verifyAndSignup] Razorpay fetch failed:", detail, "| sub:", razorpay_subscription_id);
+      return res.status(400).json({
+        success: false,
+        message: `Razorpay verification failed: ${detail}. Check that RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are correctly set in your environment.`,
+      });
     }
 
+    console.log(`[verifyAndSignup] Subscription ${razorpay_subscription_id} status: ${rzpSub.status}`);
+
+    // Acceptable statuses: authenticated = mandate set up, active = charged, created = just created
     const validStatuses = ["created", "authenticated", "active"];
     if (!validStatuses.includes(rzpSub.status)) {
       return res.status(400).json({
         success: false,
-        message: `Subscription not authorised (status: ${rzpSub.status}). Please try again.`,
+        message: `Subscription is not authorised (status: "${rzpSub.status}"). Please complete the payment and try again.`,
       });
     }
 
-    // Optional secondary HMAC check when payment_id IS present (immediate charge flow)
+    // Optional HMAC check when payment_id is present (card/immediate charge flow)
     if (razorpay_payment_id && razorpay_signature) {
       const expectedSig = crypto
         .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
@@ -282,9 +290,31 @@ const webhook = async (req, res) => {
 };
 
 // ── GET /api/razorpay/config ──────────────────────────────────────────────────
-// Returns the publishable key so the frontend doesn't need it in .env
 const getConfig = (req, res) => {
   res.json({ success: true, keyId: process.env.RAZORPAY_KEY_ID });
 };
 
-module.exports = { createSubscription, verifyAndSignup, webhook, getConfig };
+// ── GET /api/razorpay/health ──────────────────────────────────────────────────
+// Verifies Razorpay credentials are correctly set by making a test API call
+const healthCheck = async (req, res) => {
+  try {
+    const plans = await getRazorpay().plans.all({ count: 1 });
+    res.json({
+      success: true,
+      message: "Razorpay credentials are valid.",
+      keyId: process.env.RAZORPAY_KEY_ID,
+      planBasic: process.env.RAZORPAY_PLAN_BASIC || "NOT SET",
+      planPro: process.env.RAZORPAY_PLAN_PRO || "NOT SET",
+      planEnterprise: process.env.RAZORPAY_PLAN_ENTERPRISE || "NOT SET",
+    });
+  } catch (e) {
+    const detail = e?.error?.description || e?.message || "Unknown error";
+    res.status(400).json({
+      success: false,
+      message: `Razorpay credentials invalid: ${detail}`,
+      keyId: process.env.RAZORPAY_KEY_ID || "NOT SET",
+    });
+  }
+};
+
+module.exports = { createSubscription, verifyAndSignup, webhook, getConfig, healthCheck };

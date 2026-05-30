@@ -1,9 +1,10 @@
 const express = require("express");
 const router = express.Router();
-const { createSubscription, verifyAndSignup, webhook, getConfig } = require("../controllers/razorpayController");
+const { createSubscription, verifyAndSignup, webhook, getConfig, healthCheck } = require("../controllers/razorpayController");
 
 // Public — no auth required
 router.get("/config", getConfig);
+router.get("/health", healthCheck);
 router.post("/create-subscription", createSubscription);
 router.post("/verify-and-signup", verifyAndSignup);
 
