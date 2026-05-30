@@ -46,7 +46,12 @@ function userPayload(user, tenant) {
   };
 }
 
-const PLAN_PRICES = { basic: 999, pro: 2499, enterprise: 4999 };
+const MONTHLY_PRICES = { basic: 999, pro: 2499, enterprise: 4999 };
+const YEARLY_PRICES  = {
+  basic:      Math.round(999  * 12 * 0.9),
+  pro:        Math.round(2499 * 12 * 0.9),
+  enterprise: Math.round(4999 * 12 * 0.9),
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/razorpay/health  — verify credentials + env vars are all set
@@ -84,33 +89,37 @@ const health = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const createSubscription = async (req, res, next) => {
   try {
-    const { plan = "pro", email, companyName } = req.body;
+    const { plan = "pro", billing = "monthly", email, companyName } = req.body;
     if (!email || !companyName) {
       return res.status(400).json({ success: false, message: "email and companyName are required." });
     }
 
-    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}`];
+    const billingKey = billing === "yearly" ? "YEARLY" : "MONTHLY";
+    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}_${billingKey}`];
     if (!planId) {
       return res.status(400).json({
         success: false,
-        message: `Plan "${plan}" is not configured. Ensure RAZORPAY_PLAN_${plan.toUpperCase()} is set in env.`,
+        message: `Plan "${plan}" (${billing}) not configured. Ensure RAZORPAY_PLAN_${plan.toUpperCase()}_${billingKey} is set.`,
       });
     }
 
     const subscription = await getRzp().subscriptions.create({
       plan_id: planId,
-      total_count: 120,
+      total_count: billing === "yearly" ? 10 : 120, // 10 years yearly / 10 years monthly
       quantity: 1,
       customer_notify: 1,
-      notes: { company: companyName, email, plan },
+      notes: { company: companyName, email, plan, billing },
     });
+
+    const prices = billing === "yearly" ? YEARLY_PRICES : MONTHLY_PRICES;
 
     res.json({
       success: true,
       subscriptionId: subscription.id,
       keyId: process.env.RAZORPAY_KEY_ID,
-      amount: PLAN_PRICES[plan] * 100,
+      amount: prices[plan] * 100,
       plan,
+      billing,
     });
   } catch (err) {
     const msg = err?.error?.description || err?.message || "Subscription creation failed.";
