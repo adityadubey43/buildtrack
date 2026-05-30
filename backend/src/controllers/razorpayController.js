@@ -66,18 +66,29 @@ const createSubscription = async (req, res, next) => {
     // start_at = Unix timestamp 7 days from now (trial period)
     const startAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
 
-    const subscription = await getRazorpay().subscriptions.create({
-      plan_id: planId,
-      total_count: 120, // 10 years max billing cycles
-      quantity: 1,
-      start_at: startAt,
-      customer_notify: 1,
-      notes: {
-        company: companyName,
-        email,
-        plan,
-      },
-    });
+    let subscription;
+    try {
+      subscription = await getRazorpay().subscriptions.create({
+        plan_id: planId,
+        total_count: 120, // 10 years max billing cycles
+        quantity: 1,
+        start_at: startAt,
+        customer_notify: 1,
+        notes: {
+          company: companyName,
+          email,
+          plan,
+        },
+      });
+    } catch (rzpErr) {
+      // Surface the actual Razorpay error message instead of a generic 500
+      const description =
+        rzpErr?.error?.description ||
+        rzpErr?.error?.error?.description ||
+        rzpErr?.message ||
+        "Razorpay subscription creation failed.";
+      return res.status(502).json({ success: false, message: description, rzpError: rzpErr?.error || null });
+    }
 
     res.json({
       success: true,
