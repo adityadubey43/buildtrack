@@ -4,10 +4,20 @@ const Tenant = require("../models/Tenant");
 const User = require("../models/User");
 const { generateToken, generateTenantId, generateUniqueSlug } = require("../utils/generateToken");
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+// Lazy singleton — instantiated on first request so missing env vars don't crash startup
+let _razorpay = null;
+function getRazorpay() {
+  if (!_razorpay) {
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+      throw new Error("Razorpay credentials not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET env vars.");
+    }
+    _razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return _razorpay;
+}
 
 // Plan ID map — populated from env after running scripts/createRazorpayPlans.js
 const PLAN_IDS = () => ({
@@ -56,7 +66,7 @@ const createSubscription = async (req, res, next) => {
     // start_at = Unix timestamp 7 days from now (trial period)
     const startAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
 
-    const subscription = await razorpay.subscriptions.create({
+    const subscription = await getRazorpay().subscriptions.create({
       plan_id: planId,
       total_count: 120, // 10 years max billing cycles
       quantity: 1,
