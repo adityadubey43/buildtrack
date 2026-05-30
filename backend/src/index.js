@@ -63,6 +63,15 @@ app.use("/api/expenses", require("./routes/expenses"));
 app.use("/api/payments", require("./routes/payments"));
 app.use("/api/platform", require("./routes/platform")); // BuildTrack super-admin console
 
+// Razorpay webhook — raw body required for HMAC signature check (must be before JSON parser)
+app.post(
+  "/api/razorpay/webhook",
+  express.raw({ type: "application/json" }),
+  require("./controllers/razorpayController").webhook
+);
+// All other Razorpay routes use regular JSON body
+app.use("/api/razorpay", require("./routes/razorpay"));
+
 // Health check
 app.get("/health", (req, res) => {
   res.json({
