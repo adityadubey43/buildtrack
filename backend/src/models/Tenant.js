@@ -21,6 +21,7 @@ const tenantSchema = new mongoose.Schema(
     },
     trialEndsAt: { type: Date },
     subscriptionId: { type: String },
+    razorpaySubscriptionId: { type: String, index: true, sparse: true },
     logo: { type: String },
     isActive: { type: Boolean, default: true },
   },
