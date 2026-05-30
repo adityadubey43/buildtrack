@@ -1,0 +1,26 @@
+# Render Blueprint — deploys the BuildTrack Express API as a persistent web service.
+# In Render: New → Blueprint → point at this repo. Fill the `sync: false` vars in the dashboard.
+services:
+  - type: web
+    name: buildtrack-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: CLIENT_URL
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
