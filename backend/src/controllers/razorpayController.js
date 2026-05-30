@@ -1,185 +1,168 @@
 const Razorpay = require("razorpay");
-const crypto = require("crypto");
-const Tenant = require("../models/Tenant");
-const User = require("../models/User");
+const crypto   = require("crypto");
+const Tenant   = require("../models/Tenant");
+const User     = require("../models/User");
 const { generateToken, generateTenantId, generateUniqueSlug } = require("../utils/generateToken");
 
 // ── Lazy Razorpay instance ────────────────────────────────────────────────────
 let _rzp = null;
 function getRzp() {
   if (!_rzp) {
-    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
       throw new Error("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be set.");
-    }
-    _rzp = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
-    });
+    _rzp = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
   }
   return _rzp;
 }
 
-// ── HMAC signature verification ───────────────────────────────────────────────
-// Razorpay docs: https://razorpay.com/docs/payments/subscriptions/verify-signature/
-// Formula: HMAC-SHA256( payment_id + "|" + subscription_id , key_secret )
-function verifySignature(paymentId, subscriptionId, signature) {
-  const expected = crypto
-    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-    .update(`${paymentId}|${subscriptionId}`)
-    .digest("hex");
-  return expected === signature;
+// ── Pricing ───────────────────────────────────────────────────────────────────
+const MONTHLY_PRICES = { basic: 999,  pro: 2499,  enterprise: 4999 };
+const YEARLY_PRICES  = {
+  basic:      Math.round(999  * 12 * 0.9),  // ₹10,789
+  pro:        Math.round(2499 * 12 * 0.9),  // ₹26,989
+  enterprise: Math.round(4999 * 12 * 0.9),  // ₹53,989
+};
+
+// ── HMAC helpers ──────────────────────────────────────────────────────────────
+// Subscription:  HMAC( payment_id | subscription_id , secret )
+function verifySubscriptionSig(paymentId, subscriptionId, sig) {
+  const exp = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(`${paymentId}|${subscriptionId}`).digest("hex");
+  return exp === sig;
+}
+// Order:  HMAC( order_id | payment_id , secret )
+function verifyOrderSig(orderId, paymentId, sig) {
+  const exp = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(`${orderId}|${paymentId}`).digest("hex");
+  return exp === sig;
 }
 
-// ── User payload helper ───────────────────────────────────────────────────────
+// ── User payload ──────────────────────────────────────────────────────────────
 function userPayload(user, tenant) {
   return {
-    id: user._id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    tenantId: user.tenantId,
-    slug: tenant.slug,
-    companyName: tenant.companyName,
-    plan: tenant.plan,
-    planStatus: tenant.planStatus,
-    trialEndsAt: tenant.trialEndsAt,
+    id: user._id, name: user.name, email: user.email, role: user.role,
+    tenantId: user.tenantId, slug: tenant.slug, companyName: tenant.companyName,
+    plan: tenant.plan, planStatus: tenant.planStatus, trialEndsAt: tenant.trialEndsAt,
   };
 }
 
-const MONTHLY_PRICES = { basic: 999, pro: 2499, enterprise: 4999 };
-const YEARLY_PRICES  = {
-  basic:      Math.round(999  * 12 * 0.9),
-  pro:        Math.round(2499 * 12 * 0.9),
-  enterprise: Math.round(4999 * 12 * 0.9),
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/razorpay/health  — verify credentials + env vars are all set
+// GET /api/razorpay/health
 // ─────────────────────────────────────────────────────────────────────────────
 const health = async (req, res) => {
   const missing = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_PLAN_BASIC", "RAZORPAY_PLAN_PRO", "RAZORPAY_PLAN_ENTERPRISE"]
     .filter((k) => !process.env[k]);
-
-  if (missing.length) {
-    return res.status(400).json({ success: false, message: `Missing env vars: ${missing.join(", ")}` });
-  }
-
+  if (missing.length) return res.status(400).json({ success: false, message: `Missing env vars: ${missing.join(", ")}` });
   try {
     await getRzp().plans.all({ count: 1 });
-    res.json({
-      success: true,
-      keyId: process.env.RAZORPAY_KEY_ID,
-      plans: {
-        basic: process.env.RAZORPAY_PLAN_BASIC,
-        pro: process.env.RAZORPAY_PLAN_PRO,
-        enterprise: process.env.RAZORPAY_PLAN_ENTERPRISE,
-      },
-    });
+    res.json({ success: true, keyId: process.env.RAZORPAY_KEY_ID, mode: process.env.RAZORPAY_KEY_ID.startsWith("rzp_live") ? "live" : "test" });
   } catch (e) {
-    res.status(400).json({
-      success: false,
-      message: `Razorpay API rejected credentials: ${e?.error?.description || e?.message}`,
-      keyId: process.env.RAZORPAY_KEY_ID,
-    });
+    res.status(400).json({ success: false, message: `Credentials invalid: ${e?.error?.description || e?.message}`, keyId: process.env.RAZORPAY_KEY_ID });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/razorpay/create-subscription  — public, called from signup/settings
+// POST /api/razorpay/create-subscription  — monthly recurring
 // ─────────────────────────────────────────────────────────────────────────────
-const createSubscription = async (req, res, next) => {
+const createSubscription = async (req, res) => {
   try {
-    const { plan = "pro", billing = "monthly", email, companyName } = req.body;
-    if (!email || !companyName) {
-      return res.status(400).json({ success: false, message: "email and companyName are required." });
-    }
+    const { plan = "pro", email, companyName } = req.body;
+    if (!email || !companyName) return res.status(400).json({ success: false, message: "email and companyName are required." });
 
-    // Always use the monthly plan — yearly is just a discounted display price
     const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}`];
-    if (!planId) {
-      return res.status(400).json({
-        success: false,
-        message: `Plan "${plan}" not configured. Ensure RAZORPAY_PLAN_${plan.toUpperCase()} is set.`,
-      });
-    }
+    if (!planId) return res.status(400).json({ success: false, message: `Plan "${plan}" not configured. Set RAZORPAY_PLAN_${plan.toUpperCase()} in env.` });
 
-    const subscription = await getRzp().subscriptions.create({
-      plan_id: planId,
-      total_count: 120,
-      quantity: 1,
-      customer_notify: 1,
-      notes: { company: companyName, email, plan, billing },
+    const sub = await getRzp().subscriptions.create({
+      plan_id: planId, total_count: 120, quantity: 1, customer_notify: 1,
+      notes: { company: companyName, email, plan, billing: "monthly" },
     });
 
-    // Show yearly discounted price in UI; actual billing is monthly
-    const displayAmount = billing === "yearly"
-      ? YEARLY_PRICES[plan] * 100
-      : MONTHLY_PRICES[plan] * 100;
-
-    res.json({
-      success: true,
-      subscriptionId: subscription.id,
-      keyId: process.env.RAZORPAY_KEY_ID,
-      amount: displayAmount,
-      plan,
-      billing,
-    });
+    res.json({ success: true, subscriptionId: sub.id, keyId: process.env.RAZORPAY_KEY_ID, amount: MONTHLY_PRICES[plan] * 100, plan, billing: "monthly" });
   } catch (err) {
-    const msg = err?.error?.description || err?.message || "Subscription creation failed.";
-    res.status(502).json({ success: false, message: msg });
+    res.status(502).json({ success: false, message: err?.error?.description || err?.message || "Subscription creation failed." });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/razorpay/verify-and-signup  — public, new user paying at signup
+// POST /api/razorpay/create-order  — yearly one-time charge
+// ─────────────────────────────────────────────────────────────────────────────
+const createOrder = async (req, res) => {
+  try {
+    const { plan = "pro", email, companyName } = req.body;
+    if (!email || !companyName) return res.status(400).json({ success: false, message: "email and companyName are required." });
+
+    const amount = YEARLY_PRICES[plan];
+    if (!amount) return res.status(400).json({ success: false, message: `Unknown plan "${plan}".` });
+
+    const order = await getRzp().orders.create({
+      amount: amount * 100, // paise
+      currency: "INR",
+      receipt: `yr_${plan}_${Date.now()}`,
+      notes: { company: companyName, email, plan, billing: "yearly" },
+    });
+
+    res.json({ success: true, orderId: order.id, keyId: process.env.RAZORPAY_KEY_ID, amount: amount * 100, plan, billing: "yearly" });
+  } catch (err) {
+    res.status(502).json({ success: false, message: err?.error?.description || err?.message || "Order creation failed." });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/razorpay/verify-and-signup  — new user, handles both monthly & yearly
 // ─────────────────────────────────────────────────────────────────────────────
 const verifyAndSignup = async (req, res, next) => {
   try {
     const {
-      razorpay_payment_id,
-      razorpay_subscription_id,
-      razorpay_signature,
-      companyName, adminName, email, password, phone, plan = "pro",
+      // subscription fields
+      razorpay_payment_id, razorpay_subscription_id, razorpay_signature,
+      // order fields
+      razorpay_order_id,
+      // signup fields
+      companyName, adminName, email, password, phone, plan = "pro", billing = "monthly",
     } = req.body;
 
-    // ── Validate fields ──
-    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
-      return res.status(400).json({ success: false, message: "Missing Razorpay payment fields." });
-    }
-    if (!companyName || !adminName || !email || !password) {
+    if (!companyName || !adminName || !email || !password)
       return res.status(400).json({ success: false, message: "All signup fields are required." });
-    }
-    if (password.length < 8) {
+    if (password.length < 8)
       return res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
+
+    // ── Verify signature based on billing type ──
+    if (billing === "yearly") {
+      if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
+        return res.status(400).json({ success: false, message: "Missing Razorpay order payment details." });
+      if (!verifyOrderSig(razorpay_order_id, razorpay_payment_id, razorpay_signature))
+        return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
+    } else {
+      if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature)
+        return res.status(400).json({ success: false, message: "Missing Razorpay subscription payment details." });
+      if (!verifySubscriptionSig(razorpay_payment_id, razorpay_subscription_id, razorpay_signature))
+        return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
     }
 
-    // ── Verify HMAC signature ──
-    if (!verifySignature(razorpay_payment_id, razorpay_subscription_id, razorpay_signature)) {
-      return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
-    }
+    const refId = billing === "yearly" ? razorpay_order_id : razorpay_subscription_id;
 
-    // ── Idempotency: already created? return existing account ──
-    const existing = await Tenant.findOne({ razorpaySubscriptionId: razorpay_subscription_id });
+    // ── Idempotency ──
+    const existing = await Tenant.findOne({ razorpaySubscriptionId: refId });
     if (existing) {
-      const existingUser = await User.findOne({ tenantId: existing.tenantId, role: "admin" });
-      if (existingUser) {
-        return res.json({ success: true, token: generateToken(existingUser._id), user: userPayload(existingUser, existing) });
-      }
+      const eu = await User.findOne({ tenantId: existing.tenantId, role: "admin" });
+      if (eu) return res.json({ success: true, token: generateToken(eu._id), user: userPayload(eu, existing) });
     }
 
-    // ── Create Tenant + User ──
+    // ── Create tenant + user ──
     const tenantId = generateTenantId();
     const slug = await generateUniqueSlug(Tenant, companyName);
+    const renewsAt = billing === "yearly"
+      ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+      : null;
 
     const tenant = await Tenant.create({
       tenantId, slug, companyName, phone, plan,
       planStatus: "active",
-      razorpaySubscriptionId: razorpay_subscription_id,
+      razorpaySubscriptionId: refId,
+      ...(renewsAt && { trialEndsAt: renewsAt }), // repurpose trialEndsAt as renewsAt for yearly
     });
 
-    const user = await User.create({
-      tenantId, name: adminName, email: email.toLowerCase(), password, phone, role: "admin",
-    });
+    const user = await User.create({ tenantId, name: adminName, email: email.toLowerCase(), password, phone, role: "admin" });
 
     res.status(201).json({
       success: true,
@@ -187,9 +170,7 @@ const verifyAndSignup = async (req, res, next) => {
       token: generateToken(user._id),
       user: userPayload(user, tenant),
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,40 +178,50 @@ const verifyAndSignup = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const activateSubscription = async (req, res, next) => {
   try {
-    const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
+    const {
+      razorpay_payment_id, razorpay_subscription_id, razorpay_signature,
+      razorpay_order_id,
+      billing = "monthly", plan,
+    } = req.body;
 
-    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
-      return res.status(400).json({ success: false, message: "Missing Razorpay payment fields." });
+    // ── Verify ──
+    if (billing === "yearly") {
+      if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
+        return res.status(400).json({ success: false, message: "Missing payment details." });
+      if (!verifyOrderSig(razorpay_order_id, razorpay_payment_id, razorpay_signature))
+        return res.status(400).json({ success: false, message: "Payment verification failed." });
+    } else {
+      if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature)
+        return res.status(400).json({ success: false, message: "Missing payment details." });
+      if (!verifySubscriptionSig(razorpay_payment_id, razorpay_subscription_id, razorpay_signature))
+        return res.status(400).json({ success: false, message: "Payment verification failed." });
     }
 
-    // ── Verify HMAC signature ──
-    if (!verifySignature(razorpay_payment_id, razorpay_subscription_id, razorpay_signature)) {
-      return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
-    }
+    const refId = billing === "yearly" ? razorpay_order_id : razorpay_subscription_id;
 
-    // ── Update existing tenant ──
+    // ── Update tenant ──
     const tenant = await Tenant.findOne({ tenantId: req.tenantId });
     if (!tenant) return res.status(404).json({ success: false, message: "Company not found." });
 
-    tenant.razorpaySubscriptionId = razorpay_subscription_id;
+    tenant.razorpaySubscriptionId = refId;
     tenant.planStatus = "active";
+    if (plan) tenant.plan = plan;
+    if (billing === "yearly") tenant.trialEndsAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
     await tenant.save();
 
     const user = await User.findById(req.user._id);
     res.json({ success: true, message: "Subscription activated!", user: userPayload(user, tenant) });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/razorpay/webhook  — raw body, Razorpay lifecycle events
+// POST /api/razorpay/webhook
 // ─────────────────────────────────────────────────────────────────────────────
 const webhook = async (req, res) => {
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    const sig = req.headers["x-razorpay-signature"];
-    const raw = req.body;
+    const sig    = req.headers["x-razorpay-signature"];
+    const raw    = req.body;
 
     if (secret && sig) {
       const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
@@ -244,14 +235,9 @@ const webhook = async (req, res) => {
     const tenant = await Tenant.findOne({ razorpaySubscriptionId: subscriptionId });
     if (!tenant) return res.json({ received: true });
 
-    if (event === "subscription.activated" || event === "subscription.charged") {
-      tenant.planStatus = "active";
-    } else if (event === "subscription.halted" || event === "subscription.pending") {
-      tenant.planStatus = "expired";
-    } else if (event === "subscription.cancelled") {
-      tenant.planStatus = "cancelled";
-      tenant.isActive = false;
-    }
+    if (event === "subscription.activated" || event === "subscription.charged") tenant.planStatus = "active";
+    else if (event === "subscription.halted" || event === "subscription.pending") tenant.planStatus = "expired";
+    else if (event === "subscription.cancelled") { tenant.planStatus = "cancelled"; tenant.isActive = false; }
 
     await tenant.save();
     res.json({ received: true });
@@ -261,4 +247,4 @@ const webhook = async (req, res) => {
   }
 };
 
-module.exports = { health, createSubscription, verifyAndSignup, activateSubscription, webhook };
+module.exports = { health, createSubscription, createOrder, verifyAndSignup, activateSubscription, webhook };
