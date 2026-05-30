@@ -102,7 +102,16 @@ const createSubscription = async (req, res, next) => {
 // Step 2: frontend sends back the Razorpay success payload.
 // We verify the subscription directly via Razorpay API (server-to-server) — this is
 // more reliable than HMAC for future-start subscriptions where razorpay_payment_id
-// may be null (mandate-only auth, no immediate charge).
+// Verifies a Razorpay payment using HMAC signature — no API call needed.
+// Razorpay docs: https://razorpay.com/docs/payments/subscriptions/verify-signature/
+function verifyRazorpaySignature(paymentId, subscriptionId, signature) {
+  const expected = crypto
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(`${paymentId}|${subscriptionId}`)
+    .digest("hex");
+  return expected === signature;
+}
+
 const verifyAndSignup = async (req, res, next) => {
   try {
     const {
@@ -117,53 +126,19 @@ const verifyAndSignup = async (req, res, next) => {
       plan = "pro",
     } = req.body;
 
-    if (!razorpay_subscription_id) {
-      return res.status(400).json({ success: false, message: "Missing Razorpay subscription ID." });
+    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, message: "Missing Razorpay payment details." });
     }
-    // For existing users activating subscription from Settings, password field is not re-validated
-    const isExistingUserFlow = password === "__existing_user__";
-
-    if (!companyName || !adminName || !email) {
-      return res.status(400).json({ success: false, message: "Company name, admin name, and email are required." });
+    if (!companyName || !adminName || !email || !password) {
+      return res.status(400).json({ success: false, message: "All signup fields are required." });
     }
-    if (!isExistingUserFlow && password.length < 8) {
+    if (password.length < 8) {
       return res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
     }
 
-    // ── Verify subscription with Razorpay API (server-to-server — cannot be faked) ──
-    let rzpSub;
-    try {
-      rzpSub = await getRazorpay().subscriptions.fetch(razorpay_subscription_id);
-    } catch (e) {
-      // Surface the actual Razorpay error (e.g. "Authentication failed" = wrong API key)
-      const detail = e?.error?.description || e?.error?.error?.description || e?.message || "Unknown error";
-      console.error("[verifyAndSignup] Razorpay fetch failed:", detail, "| sub:", razorpay_subscription_id);
-      return res.status(400).json({
-        success: false,
-        message: `Razorpay verification failed: ${detail}. Check that RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are correctly set in your environment.`,
-      });
-    }
-
-    console.log(`[verifyAndSignup] Subscription ${razorpay_subscription_id} status: ${rzpSub.status}`);
-
-    // Acceptable statuses: authenticated = mandate set up, active = charged, created = just created
-    const validStatuses = ["created", "authenticated", "active"];
-    if (!validStatuses.includes(rzpSub.status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Subscription is not authorised (status: "${rzpSub.status}"). Please complete the payment and try again.`,
-      });
-    }
-
-    // Optional HMAC check when payment_id is present (card/immediate charge flow)
-    if (razorpay_payment_id && razorpay_signature) {
-      const expectedSig = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
-        .digest("hex");
-      if (expectedSig !== razorpay_signature) {
-        return res.status(400).json({ success: false, message: "Payment signature mismatch. Please contact support." });
-      }
+    // ── HMAC signature verification (Razorpay recommended approach) ──
+    if (!verifyRazorpaySignature(razorpay_payment_id, razorpay_subscription_id, razorpay_signature)) {
+      return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
     }
 
     // ── Idempotency — don't double-create ──
@@ -190,8 +165,7 @@ const verifyAndSignup = async (req, res, next) => {
       companyName,
       phone,
       plan,
-      planStatus: "trial",
-      trialEndsAt,
+      planStatus: "active", // paid upfront — not trial
       razorpaySubscriptionId: razorpay_subscription_id,
     });
 
@@ -225,25 +199,13 @@ const activateSubscription = async (req, res, next) => {
   try {
     const { razorpay_subscription_id, razorpay_payment_id, razorpay_signature } = req.body;
 
-    if (!razorpay_subscription_id) {
-      return res.status(400).json({ success: false, message: "Missing Razorpay subscription ID." });
+    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, message: "Missing Razorpay payment details." });
     }
 
-    // ── Verify subscription with Razorpay API ──
-    let rzpSub;
-    try {
-      rzpSub = await getRazorpay().subscriptions.fetch(razorpay_subscription_id);
-    } catch (e) {
-      const detail = e?.error?.description || e?.message || "Unknown error";
-      return res.status(400).json({ success: false, message: `Razorpay verification failed: ${detail}` });
-    }
-
-    const validStatuses = ["created", "authenticated", "active"];
-    if (!validStatuses.includes(rzpSub.status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Subscription not authorised (status: "${rzpSub.status}"). Please try again.`,
-      });
+    // ── HMAC signature verification ──
+    if (!verifyRazorpaySignature(razorpay_payment_id, razorpay_subscription_id, razorpay_signature)) {
+      return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
     }
 
     // ── Update existing tenant ──
