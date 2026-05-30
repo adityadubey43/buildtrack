@@ -94,30 +94,33 @@ const createSubscription = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "email and companyName are required." });
     }
 
-    const billingKey = billing === "yearly" ? "YEARLY" : "MONTHLY";
-    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}_${billingKey}`];
+    // Always use the monthly plan — yearly is just a discounted display price
+    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}`];
     if (!planId) {
       return res.status(400).json({
         success: false,
-        message: `Plan "${plan}" (${billing}) not configured. Ensure RAZORPAY_PLAN_${plan.toUpperCase()}_${billingKey} is set.`,
+        message: `Plan "${plan}" not configured. Ensure RAZORPAY_PLAN_${plan.toUpperCase()} is set.`,
       });
     }
 
     const subscription = await getRzp().subscriptions.create({
       plan_id: planId,
-      total_count: billing === "yearly" ? 10 : 120, // 10 years yearly / 10 years monthly
+      total_count: 120,
       quantity: 1,
       customer_notify: 1,
       notes: { company: companyName, email, plan, billing },
     });
 
-    const prices = billing === "yearly" ? YEARLY_PRICES : MONTHLY_PRICES;
+    // Show yearly discounted price in UI; actual billing is monthly
+    const displayAmount = billing === "yearly"
+      ? YEARLY_PRICES[plan] * 100
+      : MONTHLY_PRICES[plan] * 100;
 
     res.json({
       success: true,
       subscriptionId: subscription.id,
       keyId: process.env.RAZORPAY_KEY_ID,
-      amount: prices[plan] * 100,
+      amount: displayAmount,
       plan,
       billing,
     });

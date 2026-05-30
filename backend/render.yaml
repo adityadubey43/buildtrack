@@ -30,15 +30,9 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
-      - key: RAZORPAY_PLAN_BASIC_MONTHLY
-        value: plan_SvfQ1zSgoC6M64
-      - key: RAZORPAY_PLAN_PRO_MONTHLY
-        value: plan_SvfQ2AFGXZdz2C
-      - key: RAZORPAY_PLAN_ENTERPRISE_MONTHLY
-        value: plan_SvfQ2LvWJwYtE4
-      - key: RAZORPAY_PLAN_BASIC_YEARLY
-        value: plan_SvfQ2k3OwhTr5x
-      - key: RAZORPAY_PLAN_PRO_YEARLY
-        value: plan_SvfQ32QDSzGfGh
-      - key: RAZORPAY_PLAN_ENTERPRISE_YEARLY
-        value: plan_SvfQ3QVL8yHl2C
+      - key: RAZORPAY_PLAN_BASIC
+        value: plan_Svey9RvZxpm8kM
+      - key: RAZORPAY_PLAN_PRO
+        value: plan_Svey9fGPoduZRy
+      - key: RAZORPAY_PLAN_ENTERPRISE
+        value: plan_Svey9wqDSmphVo
