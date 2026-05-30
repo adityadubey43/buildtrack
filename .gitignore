@@ -35,3 +35,6 @@ coverage/
 
 # Claude local settings
 .claude/
+
+# Frontend moved to its own repo
+ac-saas/
