@@ -25,14 +25,14 @@ services:
       - key: CLOUDINARY_URL
         sync: false
       - key: RAZORPAY_KEY_ID
-        sync: false
+        value: rzp_test_SvdiQUTWCDNhF7
       - key: RAZORPAY_KEY_SECRET
-        sync: false
+        sync: false                      # secret — set manually in Render dashboard
       - key: RAZORPAY_WEBHOOK_SECRET
-        sync: false
+        sync: false                      # secret — set manually in Render dashboard
       - key: RAZORPAY_PLAN_BASIC
-        sync: false
+        value: plan_Svdk20YM2JbxQe
       - key: RAZORPAY_PLAN_PRO
-        sync: false
+        value: plan_Svdk2ILuIxiV4O
       - key: RAZORPAY_PLAN_ENTERPRISE
-        sync: false
+        value: plan_Svdk2dFLm2R74v
