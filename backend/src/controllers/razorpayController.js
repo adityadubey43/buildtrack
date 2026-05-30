@@ -63,16 +63,12 @@ const createSubscription = async (req, res, next) => {
       });
     }
 
-    // start_at = Unix timestamp 7 days from now (trial period)
-    const startAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
-
     let subscription;
     try {
       subscription = await getRazorpay().subscriptions.create({
         plan_id: planId,
         total_count: 120, // 10 years max billing cycles
         quantity: 1,
-        start_at: startAt,
         customer_notify: 1,
         notes: {
           company: companyName,
