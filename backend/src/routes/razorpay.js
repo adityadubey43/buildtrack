@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { health, createSubscription, verifyAndSignup, activateSubscription } = require("../controllers/razorpayController");
+const { health, createSubscription, verifyAndSignup, activateSubscription, webhook } = require("../controllers/razorpayController");
 const { protect } = require("../middleware/auth");
 
 // Public
@@ -10,5 +10,8 @@ router.post("/verify-and-signup", verifyAndSignup);
 
 // Protected (logged-in user activating from dashboard)
 router.post("/activate-subscription", protect, activateSubscription);
+
+// Webhook — needs raw body for HMAC signature verification
+router.post("/webhook", express.raw({ type: "*/*" }), webhook);
 
 module.exports = router;
