@@ -367,4 +367,4 @@ const healthCheck = async (req, res) => {
   }
 };
 
-module.exports = { createSubscription, verifyAndSignup, webhook, getConfig, healthCheck };
+module.exports = { createSubscription, verifyAndSignup, activateSubscription, webhook, getConfig, healthCheck };
