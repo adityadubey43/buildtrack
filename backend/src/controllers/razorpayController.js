@@ -104,7 +104,9 @@ const createSubscription = async (req, res, next) => {
 
 // ── POST /api/razorpay/verify-and-signup ──────────────────────────────────────
 // Step 2: frontend sends back the Razorpay success payload.
-// We verify the signature, then create the Tenant + admin User in one transaction.
+// We verify the subscription directly via Razorpay API (server-to-server) — this is
+// more reliable than HMAC for future-start subscriptions where razorpay_payment_id
+// may be null (mandate-only auth, no immediate charge).
 const verifyAndSignup = async (req, res, next) => {
   try {
     const {
@@ -119,8 +121,8 @@ const verifyAndSignup = async (req, res, next) => {
       plan = "pro",
     } = req.body;
 
-    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
-      return res.status(400).json({ success: false, message: "Missing Razorpay payment details." });
+    if (!razorpay_subscription_id) {
+      return res.status(400).json({ success: false, message: "Missing Razorpay subscription ID." });
     }
     if (!companyName || !adminName || !email || !password) {
       return res.status(400).json({ success: false, message: "All signup fields are required." });
@@ -129,14 +131,35 @@ const verifyAndSignup = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
     }
 
-    // ── Verify Razorpay signature ──
-    const expectedSig = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
-      .digest("hex");
+    // ── Verify with Razorpay API (server-to-server — cannot be faked) ──
+    // Acceptable statuses after checkout: created, authenticated, active
+    // "created"       — subscription set up, start_at in future (trial flow)
+    // "authenticated" — mandate authorised, first charge pending
+    // "active"        — first charge succeeded
+    let rzpSub;
+    try {
+      rzpSub = await getRazorpay().subscriptions.fetch(razorpay_subscription_id);
+    } catch (e) {
+      return res.status(400).json({ success: false, message: "Could not verify subscription with Razorpay." });
+    }
 
-    if (expectedSig !== razorpay_signature) {
-      return res.status(400).json({ success: false, message: "Payment verification failed. Please contact support." });
+    const validStatuses = ["created", "authenticated", "active"];
+    if (!validStatuses.includes(rzpSub.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Subscription not authorised (status: ${rzpSub.status}). Please try again.`,
+      });
+    }
+
+    // Optional secondary HMAC check when payment_id IS present (immediate charge flow)
+    if (razorpay_payment_id && razorpay_signature) {
+      const expectedSig = crypto
+        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
+        .digest("hex");
+      if (expectedSig !== razorpay_signature) {
+        return res.status(400).json({ success: false, message: "Payment signature mismatch. Please contact support." });
+      }
     }
 
     // ── Idempotency — don't double-create ──
