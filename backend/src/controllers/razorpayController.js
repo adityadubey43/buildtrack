@@ -218,6 +218,56 @@ const verifyAndSignup = async (req, res, next) => {
   }
 };
 
+// ── POST /api/razorpay/activate-subscription ─────────────────────────────────
+// For EXISTING logged-in users activating their subscription from the dashboard.
+// Verifies the Razorpay subscription and updates the existing tenant — does NOT create a new account.
+const activateSubscription = async (req, res, next) => {
+  try {
+    const { razorpay_subscription_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    if (!razorpay_subscription_id) {
+      return res.status(400).json({ success: false, message: "Missing Razorpay subscription ID." });
+    }
+
+    // ── Verify subscription with Razorpay API ──
+    let rzpSub;
+    try {
+      rzpSub = await getRazorpay().subscriptions.fetch(razorpay_subscription_id);
+    } catch (e) {
+      const detail = e?.error?.description || e?.message || "Unknown error";
+      return res.status(400).json({ success: false, message: `Razorpay verification failed: ${detail}` });
+    }
+
+    const validStatuses = ["created", "authenticated", "active"];
+    if (!validStatuses.includes(rzpSub.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Subscription not authorised (status: "${rzpSub.status}"). Please try again.`,
+      });
+    }
+
+    // ── Update existing tenant ──
+    const tenant = await Tenant.findOne({ tenantId: req.tenantId });
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: "Company account not found." });
+    }
+
+    tenant.razorpaySubscriptionId = razorpay_subscription_id;
+    tenant.planStatus = "active";
+    await tenant.save();
+
+    const user = await require("../models/User").findById(req.user._id);
+
+    res.json({
+      success: true,
+      message: "Subscription activated successfully!",
+      user: userPayload(user, tenant),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ── POST /api/razorpay/webhook ────────────────────────────────────────────────
 // Razorpay calls this for subscription lifecycle events.
 // IMPORTANT: mount with express.raw() so the body isn't parsed — signature needs raw bytes.
