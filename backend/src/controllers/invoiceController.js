@@ -43,27 +43,89 @@ const createInvoice = async (req, res, next) => {
       invoiceDate, dueDate, notes,
     } = req.body;
 
-    if (!project || !clientName || !items || items.length === 0 || !invoiceDate || !dueDate) {
-      return res.status(400).json({ success: false, message: "Project, client, items, invoice date, and due date are required." });
+    const parseBodyArray = (value) => {
+      if (Array.isArray(value)) return value;
+      if (typeof value === "string") {
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      }
+      return value;
+    };
+
+    const invoiceItems = parseBodyArray(items);
+    const parsedInvoiceDate = new Date(invoiceDate);
+    const parsedDueDate = new Date(dueDate);
+
+    if (!project || !clientName || !invoiceItems || invoiceItems.length === 0 || !invoiceDate || !dueDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Project, client, invoice items, invoice date, and due date are required.",
+      });
     }
 
-    // Auto-number invoice
-    const count = await Invoice.countDocuments({ tenantId: req.tenantId });
-    const invoiceNumber = generateInvoiceNumber(req.tenantId, count);
+    if (!Array.isArray(invoiceItems)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invoice items must be sent as an array.",
+      });
+    }
 
-    const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
-    const gstAmount = Math.round(subtotal * (gstRate / 100));
+    if (Number.isNaN(parsedInvoiceDate.getTime()) || Number.isNaN(parsedDueDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invoice date and due date must be valid dates.",
+      });
+    }
+
+    const itemErrors = invoiceItems
+      .map((item, index) => {
+        if (!item || typeof item !== "object") return `Item ${index + 1} is invalid.`;
+        if (!item.description || !item.description.toString().trim()) return `Item ${index + 1}: description is required.`;
+        const quantity = Number(item.quantity);
+        const rate = Number(item.rate);
+        if (Number.isNaN(quantity) || quantity <= 0) return `Item ${index + 1}: quantity must be a number greater than 0.`;
+        if (Number.isNaN(rate) || rate < 0) return `Item ${index + 1}: rate must be a number greater than or equal to 0.`;
+        return null;
+      })
+      .filter(Boolean);
+
+    if (itemErrors.length) {
+      return res.status(400).json({ success: false, message: itemErrors.join(" ") });
+    }
+
+    const normalizedItems = invoiceItems.map((item) => ({
+      description: item.description,
+      quantity: Number(item.quantity),
+      rate: Number(item.rate),
+      amount: item.amount != null ? Number(item.amount) : Number(item.quantity) * Number(item.rate),
+    }));
+
+    const subtotal = normalizedItems.reduce((sum, item) => sum + item.amount, 0);
+    const gstAmount = Math.round(subtotal * (Number(gstRate) / 100));
     const totalAmount = subtotal + gstAmount;
 
     const invoice = await Invoice.create({
       tenantId: req.tenantId,
-      invoiceNumber, project, clientName, clientAddress, clientGST,
-      milestone, items,
-      subtotal, gstRate, gstAmount, totalAmount,
+      invoiceNumber: generateInvoiceNumber(req.tenantId, await Invoice.countDocuments({ tenantId: req.tenantId })),
+      project,
+      clientName,
+      clientAddress,
+      clientGST,
+      milestone,
+      items: normalizedItems,
+      subtotal,
+      gstRate: Number(gstRate),
+      gstAmount,
+      totalAmount,
+      paidAmount: 0,
       balanceAmount: totalAmount,
-      invoiceDate: new Date(invoiceDate),
-      dueDate: new Date(dueDate),
-      status: "draft", notes,
+      invoiceDate: parsedInvoiceDate,
+      dueDate: parsedDueDate,
+      status: "draft",
+      notes,
       createdBy: req.user._id,
     });
 
