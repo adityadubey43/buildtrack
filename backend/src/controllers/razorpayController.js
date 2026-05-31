@@ -45,7 +45,8 @@ async function verifySubscriptionViaApi(subscriptionId) {
   try {
     const sub = await getRzp().subscriptions.fetch(subscriptionId);
     console.log(`[verify] Sub ${subscriptionId} status: ${sub.status}`);
-    return ["created", "authenticated", "active"].includes(sub.status);
+    // Accept multiple statuses: created (awaiting authorization), authenticated (mandate set), active (first charge succeeded)
+    return ["created", "authenticated", "active", "pending"].includes(sub.status);
   } catch (e) {
     console.error("[verify] API fetch failed:", e?.error?.description || e?.message);
     return false;
@@ -83,19 +84,53 @@ const health = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const createSubscription = async (req, res) => {
   try {
-    const { plan = "pro", email, companyName } = req.body;
+    const { plan = "pro", email, companyName, phone = "9999999999" } = req.body;
     if (!email || !companyName) return res.status(400).json({ success: false, message: "email and companyName are required." });
 
     const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}`];
     if (!planId) return res.status(400).json({ success: false, message: `Plan "${plan}" not configured. Set RAZORPAY_PLAN_${plan.toUpperCase()} in env.` });
 
+    // Create or get customer for recurring payments
+    let customerId;
+    try {
+      const customers = await getRzp().customers.all({ email });
+      if (customers.items && customers.items.length > 0) {
+        customerId = customers.items[0].id;
+      } else {
+        const customer = await getRzp().customers.create({
+          email, contact: phone, name: companyName,
+        });
+        customerId = customer.id;
+      }
+    } catch (e) {
+      console.warn("[createSubscription] Customer lookup failed, proceeding:", e?.message);
+    }
+
     const sub = await getRzp().subscriptions.create({
-      plan_id: planId, total_count: 120, quantity: 1, customer_notify: 1,
+      plan_id: planId,
+      total_count: 120,
+      quantity: 1,
+      customer_notify: 1,
+      customer_id: customerId,
+      receipt: `sub_${plan}_${Date.now()}`,
+      expire_by: Math.floor((new Date().getTime() + 30 * 24 * 60 * 60 * 1000) / 1000), // 30 days to authorize
+      short_url: true, // Returns payment link
       notes: { company: companyName, email, plan, billing: "monthly" },
     });
 
-    res.json({ success: true, subscriptionId: sub.id, keyId: process.env.RAZORPAY_KEY_ID, amount: MONTHLY_PRICES[plan] * 100, plan, billing: "monthly" });
+    res.json({
+      success: true,
+      subscriptionId: sub.id,
+      keyId: process.env.RAZORPAY_KEY_ID,
+      amount: MONTHLY_PRICES[plan] * 100,
+      plan,
+      billing: "monthly",
+      customerId,
+      shortUrl: sub.short_url, // Payment authorization link for customer
+      status: sub.status,
+    });
   } catch (err) {
+    console.error("[createSubscription] Error:", err?.error || err);
     res.status(502).json({ success: false, message: err?.error?.description || err?.message || "Subscription creation failed." });
   }
 };
