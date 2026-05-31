@@ -6,8 +6,34 @@ const Worker = require("../models/Worker");
 const Attendance = require("../models/Attendance");
 const { signPlatformToken } = require("../middleware/platformAuth");
 
-// Monthly list price per plan (₹). Enterprise is custom → not auto-counted.
-const PLAN_PRICES = { basic: 999, pro: 2499, enterprise: 0 };
+// Pricing per plan (₹)
+const MONTHLY_PRICES = { basic: 999,   pro: 2499,  enterprise: 4999 };
+const YEARLY_PRICES  = {
+  basic:      Math.round(999  * 12 * 0.9),  // ₹10,789
+  pro:        Math.round(2499 * 12 * 0.9),  // ₹26,989
+  enterprise: Math.round(4999 * 12 * 0.9),  // ₹53,989
+};
+
+// Returns the actual amount a tenant has paid / will pay
+// yearly tenants have subscriptionEndsAt set
+function tenantRevenue(tenant) {
+  const isYearly = !!tenant.subscriptionEndsAt;
+  const prices = isYearly ? YEARLY_PRICES : MONTHLY_PRICES;
+  return prices[tenant.plan] || 0;
+}
+
+// Monthly Recurring Revenue equivalent
+// Yearly amount is divided by 12 to get monthly equivalent
+function tenantMRR(tenant) {
+  const isYearly = !!tenant.subscriptionEndsAt;
+  if (isYearly) {
+    return Math.round((YEARLY_PRICES[tenant.plan] || 0) / 12);
+  }
+  return MONTHLY_PRICES[tenant.plan] || 0;
+}
+
+// Keep for backward compatibility
+const PLAN_PRICES = MONTHLY_PRICES;
 
 function adminPayload(a) {
   return { id: a._id, name: a.name, email: a.email, role: a.role };
@@ -67,7 +93,7 @@ const getStats = async (req, res, next) => {
         { $group: { _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } }, count: { $sum: 1 } } },
         { $sort: { "_id.y": 1, "_id.m": 1 } },
       ]),
-      Tenant.find({ planStatus: "active" }, "plan"),
+      Tenant.find({ planStatus: "active" }, "plan subscriptionEndsAt"),
     ]);
 
     const byStatus = { trial: 0, active: 0, expired: 0, cancelled: 0 };
@@ -76,11 +102,13 @@ const getStats = async (req, res, next) => {
     const byPlan = { basic: 0, pro: 0, enterprise: 0 };
     byPlanRaw.forEach((r) => { if (r._id) byPlan[r._id] = r.count; });
 
-    // MRR from *active* subscriptions only (plan-based, until Razorpay is live)
-    const mrr = activePlanTenants.reduce((s, t) => s + (PLAN_PRICES[t.plan] || 0), 0);
+    // MRR from active subscriptions — use monthly equivalent for yearly payers
+    const mrr = activePlanTenants.reduce((s, t) => s + tenantMRR(t), 0);
+    // Total revenue collected from active subs (actual amounts paid)
+    const totalRevenue = activePlanTenants.reduce((s, t) => s + tenantRevenue(t), 0);
     // Pipeline = potential MRR sitting in trials
-    const trialTenants = await Tenant.find({ planStatus: "trial" }, "plan");
-    const trialPipeline = trialTenants.reduce((s, t) => s + (PLAN_PRICES[t.plan] || 0), 0);
+    const trialTenants = await Tenant.find({ planStatus: "trial" }, "plan subscriptionEndsAt");
+    const trialPipeline = trialTenants.reduce((s, t) => s + tenantMRR(t), 0);
 
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     const monthlySignups = monthlySignupsRaw.map((r) => ({
@@ -97,6 +125,7 @@ const getStats = async (req, res, next) => {
         byStatus,
         byPlan,
         mrr,
+        totalRevenue,
         trialPipeline,
         usage: { totalUsers, totalWorkers, totalProjects },
         trialsEndingSoon,
@@ -137,10 +166,15 @@ const getCompanies = async (req, res, next) => {
       planStatus: t.planStatus,
       isActive: t.isActive,
       trialEndsAt: t.trialEndsAt,
+      subscriptionStartedAt: t.subscriptionStartedAt,
+      subscriptionEndsAt: t.subscriptionEndsAt,
+      billingCycle: t.subscriptionEndsAt ? "yearly" : "monthly",
       createdAt: t.createdAt,
       users: uMap[t.tenantId] || 0,
       projects: pMap[t.tenantId] || 0,
-      mrr: t.planStatus === "active" ? PLAN_PRICES[t.plan] || 0 : 0,
+      // amountPaid = actual total paid (yearly = full year upfront, monthly = per month)
+      amountPaid: t.planStatus === "active" ? tenantRevenue(t) : 0,
+      mrr: t.planStatus === "active" ? tenantMRR(t) : 0,
     }));
 
     res.json({ success: true, count: data.length, data });
