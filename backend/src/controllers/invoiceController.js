@@ -1,4 +1,6 @@
+const mongoose = require("mongoose");
 const Invoice = require("../models/Invoice");
+const PaymentReceived = require("../models/PaymentReceived");
 const { generateInvoiceNumber } = require("../utils/generateToken");
 
 // GET /api/invoices
@@ -152,18 +154,30 @@ const updateInvoice = async (req, res, next) => {
 
 // POST /api/invoices/:id/payment
 const recordPayment = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { amount, date, mode, reference, notes } = req.body;
-    if (!amount || !date) {
-      return res.status(400).json({ success: false, message: "Amount and date are required." });
+    const paymentAmount = Number(amount);
+    const paymentDate = new Date(date);
+
+    if (Number.isNaN(paymentAmount) || paymentAmount <= 0 || Number.isNaN(paymentDate.getTime())) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ success: false, message: "A valid payment amount and date are required." });
     }
 
-    const invoice = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenantId });
-    if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found." });
+    const invoice = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenantId }).session(session);
+    if (!invoice) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ success: false, message: "Invoice not found." });
+    }
 
-    invoice.payments.push({ amount: Number(amount), date: new Date(date), mode, reference, notes });
-    invoice.paidAmount += Number(amount);
-    invoice.balanceAmount = invoice.totalAmount - invoice.paidAmount;
+    invoice.payments.push({ amount: paymentAmount, date: paymentDate, mode: mode || "bank", reference, notes });
+    invoice.paidAmount += paymentAmount;
+    invoice.balanceAmount = Math.max(0, invoice.totalAmount - invoice.paidAmount);
 
     if (invoice.balanceAmount <= 0) {
       invoice.status = "paid";
@@ -171,9 +185,35 @@ const recordPayment = async (req, res, next) => {
       invoice.status = "partially-paid";
     }
 
-    await invoice.save();
+    await invoice.save({ session });
+
+    await PaymentReceived.create(
+      [
+        {
+          tenantId: req.tenantId,
+          project: invoice.project,
+          clientName: invoice.clientName,
+          invoice: invoice._id,
+          amount: paymentAmount,
+          date: paymentDate,
+          paymentMode: mode || "bank",
+          reference,
+          milestone: invoice.milestone,
+          notes,
+          recordedBy: req.user._id,
+        },
+      ],
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+
+    await invoice.populate("project", "name location").populate("createdBy", "name");
     res.json({ success: true, message: "Payment recorded.", data: invoice });
   } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
     next(err);
   }
 };
