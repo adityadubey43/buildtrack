@@ -112,9 +112,7 @@ const createSubscription = async (req, res) => {
       quantity: 1,
       customer_notify: 1,
       customer_id: customerId,
-      receipt: `sub_${plan}_${Date.now()}`,
       expire_by: Math.floor((new Date().getTime() + 30 * 24 * 60 * 60 * 1000) / 1000), // 30 days to authorize
-      short_url: true, // Returns payment link
       notes: { company: companyName, email, plan, billing: "monthly" },
     });
 
@@ -126,7 +124,6 @@ const createSubscription = async (req, res) => {
       plan,
       billing: "monthly",
       customerId,
-      shortUrl: sub.short_url, // Payment authorization link for customer
       status: sub.status,
     });
   } catch (err) {
