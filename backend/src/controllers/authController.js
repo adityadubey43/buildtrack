@@ -15,6 +15,8 @@ function userPayload(user, tenant) {
     plan: tenant.plan,
     planStatus: tenant.planStatus,
     trialEndsAt: tenant.trialEndsAt,
+    subscriptionStartedAt: tenant.subscriptionStartedAt,
+    subscriptionEndsAt: tenant.subscriptionEndsAt,
   };
 }
 

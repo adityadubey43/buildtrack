@@ -58,6 +58,8 @@ function userPayload(user, tenant) {
     id: user._id, name: user.name, email: user.email, role: user.role,
     tenantId: user.tenantId, slug: tenant.slug, companyName: tenant.companyName,
     plan: tenant.plan, planStatus: tenant.planStatus, trialEndsAt: tenant.trialEndsAt,
+    subscriptionStartedAt: tenant.subscriptionStartedAt,
+    subscriptionEndsAt:    tenant.subscriptionEndsAt,
   };
 }
 
@@ -194,7 +196,8 @@ const verifyAndSignup = async (req, res, next) => {
     // ── Create tenant + user ──
     const tenantId = generateTenantId();
     const slug = await generateUniqueSlug(Tenant, companyName);
-    const renewsAt = billing === "yearly"
+    const now = new Date();
+    const endsAt = billing === "yearly"
       ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
       : null;
 
@@ -202,7 +205,9 @@ const verifyAndSignup = async (req, res, next) => {
       tenantId, slug, companyName, phone, plan,
       planStatus: "active",
       razorpaySubscriptionId: refId,
-      ...(renewsAt && { trialEndsAt: renewsAt }), // repurpose trialEndsAt as renewsAt for yearly
+      subscriptionStartedAt: now,
+      subscriptionEndsAt: endsAt,       // null for monthly (Razorpay auto-renews)
+      ...(endsAt && { trialEndsAt: endsAt }),
     });
 
     const user = await User.create({ tenantId, name: adminName, email: email.toLowerCase(), password, phone, role: "admin" });
@@ -256,10 +261,18 @@ const activateSubscription = async (req, res, next) => {
     const tenant = await Tenant.findOne({ tenantId: req.tenantId });
     if (!tenant) return res.status(404).json({ success: false, message: "Company not found." });
 
+    const now = new Date();
     tenant.razorpaySubscriptionId = refId;
     tenant.planStatus = "active";
+    tenant.subscriptionStartedAt = now;
     if (plan) tenant.plan = plan;
-    if (billing === "yearly") tenant.trialEndsAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+    if (billing === "yearly") {
+      const endsAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+      tenant.subscriptionEndsAt = endsAt;
+      tenant.trialEndsAt = endsAt;
+    } else {
+      tenant.subscriptionEndsAt = null; // monthly — Razorpay handles renewal
+    }
     await tenant.save();
 
     const user = await User.findById(req.user._id);

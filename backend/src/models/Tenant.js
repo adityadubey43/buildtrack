@@ -22,6 +22,8 @@ const tenantSchema = new mongoose.Schema(
     trialEndsAt: { type: Date },
     subscriptionId: { type: String },
     razorpaySubscriptionId: { type: String, index: true, sparse: true },
+    subscriptionStartedAt: { type: Date },   // when planStatus became "active"
+    subscriptionEndsAt:    { type: Date },   // null = monthly (Razorpay handles), date = yearly renewal
     logo: { type: String },
     isActive: { type: Boolean, default: true },
   },
