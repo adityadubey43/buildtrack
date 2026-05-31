@@ -319,7 +319,13 @@ async function getOrCreateSelfWorker(req) {
     engineer: "engineer", supervisor: "supervisor", accountant: "accountant",
     admin: "office-staff", partner: "office-staff",
   };
-  const firstProj = await Project.findOne({ tenantId: req.tenantId, status: "active" }).sort({ createdAt: 1 });
+  // Admins don't need a default site assignment; they can check in across all sites
+  const isAdmin = ["admin", "accountant"].includes(req.user.role);
+  let defaultSite = undefined;
+  if (!isAdmin) {
+    const firstProj = await Project.findOne({ tenantId: req.tenantId, status: "active" }).sort({ createdAt: 1 });
+    defaultSite = firstProj ? firstProj._id : undefined;
+  }
   return Worker.create({
     tenantId: req.tenantId,
     userId: req.user._id,
@@ -327,7 +333,7 @@ async function getOrCreateSelfWorker(req) {
     role: roleMap[req.user.role] || "office-staff",
     workerType: "employee",
     monthlySalary: 0,
-    assignedSite: firstProj ? firstProj._id : undefined,
+    assignedSite: defaultSite,
   });
 }
 
@@ -351,8 +357,9 @@ const checkIn = async (req, res, next) => {
       }
     }
 
+    // Resolve project - can be null for anyone (site assignment is optional)
     const proj = await resolveProject(req.tenantId, w, project);
-    if (!proj) return res.status(400).json({ success: false, message: "No site assigned. Select a site for this staff member." });
+    // Project/site is optional for all users - attendance doesn't require a specific site
 
     const { start } = dayBounds(date);
     const now = new Date();
@@ -365,14 +372,17 @@ const checkIn = async (req, res, next) => {
       return res.status(409).json({ success: false, message: "Already checked in today." });
     }
 
+    const updateData = {
+      tenantId: req.tenantId, worker: w._id, date: start,
+      attendanceType: "employee", status: "present",
+      checkInAt: now, checkInPhoto: photoUrl, timeIn: hhmm(now),
+      markedBy: req.user._id,
+    };
+    if (proj) updateData.project = proj;
+
     const record = await Attendance.findOneAndUpdate(
-      { tenantId: req.tenantId, worker: w._id, project: proj, date: start },
-      {
-        tenantId: req.tenantId, worker: w._id, project: proj, date: start,
-        attendanceType: "employee", status: "present",
-        checkInAt: now, checkInPhoto: photoUrl, timeIn: hhmm(now),
-        markedBy: req.user._id,
-      },
+      { tenantId: req.tenantId, worker: w._id, date: start, ...(proj ? { project: proj } : {}) },
+      updateData,
       { upsert: true, new: true, runValidators: true }
     );
 
@@ -404,11 +414,13 @@ const checkOut = async (req, res, next) => {
     const { start, end } = dayBounds(date);
     const now = new Date();
 
-    const record = await Attendance.findOne({
+    // Build filter - search without project filter to find existing record
+    const filter = {
       tenantId: req.tenantId, worker: w._id, attendanceType: "employee",
       date: { $gte: start, $lte: end },
-      ...(proj ? { project: proj } : {}),
-    });
+    };
+    
+    const record = await Attendance.findOne(filter);
 
     if (!record || !record.checkInAt) {
       return res.status(400).json({ success: false, message: "No check-in found for today. Check in first." });

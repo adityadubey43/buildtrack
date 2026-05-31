@@ -68,7 +68,8 @@ function userPayload(user, tenant) {
 // GET /api/razorpay/health
 // ─────────────────────────────────────────────────────────────────────────────
 const health = async (req, res) => {
-  const missing = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_PLAN_BASIC", "RAZORPAY_PLAN_PRO", "RAZORPAY_PLAN_ENTERPRISE"]
+  // Check for monthly plan env vars (yearly are optional)
+  const missing = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_PLAN_BASIC_MONTHLY", "RAZORPAY_PLAN_PRO_MONTHLY", "RAZORPAY_PLAN_ENTERPRISE_MONTHLY"]
     .filter((k) => !process.env[k]);
   if (missing.length) return res.status(400).json({ success: false, message: `Missing env vars: ${missing.join(", ")}` });
   try {
@@ -87,8 +88,8 @@ const createSubscription = async (req, res) => {
     const { plan = "pro", email, companyName, phone = "9999999999" } = req.body;
     if (!email || !companyName) return res.status(400).json({ success: false, message: "email and companyName are required." });
 
-    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}`];
-    if (!planId) return res.status(400).json({ success: false, message: `Plan "${plan}" not configured. Set RAZORPAY_PLAN_${plan.toUpperCase()} in env.` });
+    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}_MONTHLY`];
+    if (!planId) return res.status(400).json({ success: false, message: `Plan "${plan}" (monthly) not configured. Set RAZORPAY_PLAN_${plan.toUpperCase()}_MONTHLY in env.` });
 
     // Create or get customer for recurring payments
     let customerId;
@@ -108,8 +109,7 @@ const createSubscription = async (req, res) => {
 
     const sub = await getRzp().subscriptions.create({
       plan_id: planId,
-      total_count: 120,
-      quantity: 1,
+      total_count: 0,  // 0 = unlimited renewals for monthly subscriptions
       customer_notify: 1,
       customer_id: customerId,
       expire_by: Math.floor((new Date().getTime() + 30 * 24 * 60 * 60 * 1000) / 1000), // 30 days to authorize

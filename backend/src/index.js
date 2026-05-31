@@ -56,7 +56,8 @@ app.use("/api/payroll", require("./routes/payroll"));
 app.use("/api/dpr", require("./routes/dpr"));
 app.use("/api/materials", require("./routes/materials"));
 app.use("/api/invoices", require("./routes/invoices"));
-app.use("/api/team", require("./routes/team"));
+// Team routes removed - use workers/staff endpoints instead
+// app.use("/api/team", require("./routes/team"));
 app.use("/api/equipment", require("./routes/equipment"));
 app.use("/api/upload", require("./routes/upload"));
 app.use("/api/expenses", require("./routes/expenses"));

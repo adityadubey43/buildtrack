@@ -14,6 +14,12 @@ const getTeam = async (req, res, next) => {
       .populate("assignedSites", "name location")
       .sort({ createdAt: -1 });
 
+    console.log("📋 Team members fetched:", {
+      filter: filter,
+      count: members.length,
+      members: members.map(m => ({ name: m.name, email: m.email, role: m.role, isActive: m.isActive })),
+    });
+
     res.json({ success: true, count: members.length, data: members });
   } catch (err) {
     next(err);
