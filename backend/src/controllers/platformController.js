@@ -14,19 +14,27 @@ const YEARLY_PRICES  = {
   enterprise: Math.round(4999 * 12 * 0.9),  // ₹53,989
 };
 
+// A tenant is on yearly billing if they have subscriptionEndsAt set,
+// OR if they are active and trialEndsAt is set far in the future (>30 days)
+// (trialEndsAt was repurposed as renewsAt for yearly plans)
+function isYearlyTenant(tenant) {
+  if (tenant.subscriptionEndsAt) return true;
+  if (tenant.planStatus === "active" && tenant.trialEndsAt) {
+    const daysUntilEnd = (new Date(tenant.trialEndsAt).getTime() - Date.now()) / 86400000;
+    return daysUntilEnd > 30; // active + ends > 30 days away = yearly subscriber
+  }
+  return false;
+}
+
 // Returns the actual amount a tenant has paid / will pay
-// yearly tenants have subscriptionEndsAt set
 function tenantRevenue(tenant) {
-  const isYearly = !!tenant.subscriptionEndsAt;
-  const prices = isYearly ? YEARLY_PRICES : MONTHLY_PRICES;
+  const prices = isYearlyTenant(tenant) ? YEARLY_PRICES : MONTHLY_PRICES;
   return prices[tenant.plan] || 0;
 }
 
 // Monthly Recurring Revenue equivalent
-// Yearly amount is divided by 12 to get monthly equivalent
 function tenantMRR(tenant) {
-  const isYearly = !!tenant.subscriptionEndsAt;
-  if (isYearly) {
+  if (isYearlyTenant(tenant)) {
     return Math.round((YEARLY_PRICES[tenant.plan] || 0) / 12);
   }
   return MONTHLY_PRICES[tenant.plan] || 0;
@@ -93,7 +101,7 @@ const getStats = async (req, res, next) => {
         { $group: { _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } }, count: { $sum: 1 } } },
         { $sort: { "_id.y": 1, "_id.m": 1 } },
       ]),
-      Tenant.find({ planStatus: "active" }, "plan subscriptionEndsAt"),
+      Tenant.find({ planStatus: "active" }, "plan subscriptionEndsAt trialEndsAt planStatus"),
     ]);
 
     const byStatus = { trial: 0, active: 0, expired: 0, cancelled: 0 };
@@ -168,7 +176,7 @@ const getCompanies = async (req, res, next) => {
       trialEndsAt: t.trialEndsAt,
       subscriptionStartedAt: t.subscriptionStartedAt,
       subscriptionEndsAt: t.subscriptionEndsAt,
-      billingCycle: t.subscriptionEndsAt ? "yearly" : "monthly",
+      billingCycle: isYearlyTenant(t) ? "yearly" : "monthly",
       createdAt: t.createdAt,
       users: uMap[t.tenantId] || 0,
       projects: pMap[t.tenantId] || 0,
