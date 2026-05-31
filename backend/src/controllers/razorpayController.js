@@ -26,15 +26,30 @@ const YEARLY_PRICES  = {
 // ── HMAC helpers ──────────────────────────────────────────────────────────────
 // Subscription:  HMAC( payment_id | subscription_id , secret )
 function verifySubscriptionSig(paymentId, subscriptionId, sig) {
+  if (!paymentId || !subscriptionId || !sig) return false;
   const exp = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
     .update(`${paymentId}|${subscriptionId}`).digest("hex");
   return exp === sig;
 }
 // Order:  HMAC( order_id | payment_id , secret )
 function verifyOrderSig(orderId, paymentId, sig) {
+  if (!orderId || !paymentId || !sig) return false;
   const exp = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
     .update(`${orderId}|${paymentId}`).digest("hex");
   return exp === sig;
+}
+
+// ── Verify subscription via Razorpay API (fallback when HMAC unavailable) ────
+// Used for card recurring mandates where payment_id may be absent on first auth
+async function verifySubscriptionViaApi(subscriptionId) {
+  try {
+    const sub = await getRzp().subscriptions.fetch(subscriptionId);
+    console.log(`[verify] Sub ${subscriptionId} status: ${sub.status}`);
+    return ["created", "authenticated", "active"].includes(sub.status);
+  } catch (e) {
+    console.error("[verify] API fetch failed:", e?.error?.description || e?.message);
+    return false;
+  }
 }
 
 // ── User payload ──────────────────────────────────────────────────────────────
@@ -126,17 +141,45 @@ const verifyAndSignup = async (req, res, next) => {
     if (password.length < 8)
       return res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
 
-    // ── Verify signature based on billing type ──
+    // ── Verify payment ────────────────────────────────────────────────────────
+    console.log("[verifyAndSignup] payload:", {
+      billing, plan,
+      payment_id: razorpay_payment_id || "(absent)",
+      subscription_id: razorpay_subscription_id || "(absent)",
+      order_id: razorpay_order_id || "(absent)",
+      has_sig: !!razorpay_signature,
+    });
+
     if (billing === "yearly") {
+      // Yearly: one-time Order — HMAC required
       if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
-        return res.status(400).json({ success: false, message: "Missing Razorpay order payment details." });
+        return res.status(400).json({ success: false, message: "Missing yearly payment details." });
       if (!verifyOrderSig(razorpay_order_id, razorpay_payment_id, razorpay_signature))
         return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
+
     } else {
-      if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature)
-        return res.status(400).json({ success: false, message: "Missing Razorpay subscription payment details." });
-      if (!verifySubscriptionSig(razorpay_payment_id, razorpay_subscription_id, razorpay_signature))
-        return res.status(400).json({ success: false, message: "Payment verification failed. Please try again." });
+      // Monthly: Subscription
+      if (!razorpay_subscription_id)
+        return res.status(400).json({ success: false, message: "Missing subscription ID." });
+
+      // Try HMAC first (fast, no API call)
+      const hmacOk = verifySubscriptionSig(razorpay_payment_id, razorpay_subscription_id, razorpay_signature);
+
+      if (!hmacOk) {
+        // HMAC failed or payment_id absent — this happens for card recurring mandate setup
+        // Fall back to Razorpay API to confirm subscription status
+        console.log("[verifyAndSignup] HMAC failed/absent — falling back to API verification");
+        const apiOk = await verifySubscriptionViaApi(razorpay_subscription_id);
+        if (!apiOk) {
+          return res.status(400).json({
+            success: false,
+            message: "Payment verification failed. The subscription is not authorised yet.",
+          });
+        }
+        console.log("[verifyAndSignup] API verification passed ✅");
+      } else {
+        console.log("[verifyAndSignup] HMAC verification passed ✅");
+      }
     }
 
     const refId = billing === "yearly" ? razorpay_order_id : razorpay_subscription_id;
@@ -185,16 +228,26 @@ const activateSubscription = async (req, res, next) => {
     } = req.body;
 
     // ── Verify ──
+    console.log("[activateSub] payload:", { billing, plan, payment_id: razorpay_payment_id || "(absent)", subscription_id: razorpay_subscription_id || "(absent)", order_id: razorpay_order_id || "(absent)" });
+
     if (billing === "yearly") {
       if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
-        return res.status(400).json({ success: false, message: "Missing payment details." });
+        return res.status(400).json({ success: false, message: "Missing yearly payment details." });
       if (!verifyOrderSig(razorpay_order_id, razorpay_payment_id, razorpay_signature))
         return res.status(400).json({ success: false, message: "Payment verification failed." });
     } else {
-      if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature)
-        return res.status(400).json({ success: false, message: "Missing payment details." });
-      if (!verifySubscriptionSig(razorpay_payment_id, razorpay_subscription_id, razorpay_signature))
-        return res.status(400).json({ success: false, message: "Payment verification failed." });
+      if (!razorpay_subscription_id)
+        return res.status(400).json({ success: false, message: "Missing subscription ID." });
+
+      const hmacOk = verifySubscriptionSig(razorpay_payment_id, razorpay_subscription_id, razorpay_signature);
+      if (!hmacOk) {
+        console.log("[activateSub] HMAC failed/absent — falling back to API verification");
+        const apiOk = await verifySubscriptionViaApi(razorpay_subscription_id);
+        if (!apiOk) return res.status(400).json({ success: false, message: "Payment verification failed." });
+        console.log("[activateSub] API verification passed ✅");
+      } else {
+        console.log("[activateSub] HMAC verification passed ✅");
+      }
     }
 
     const refId = billing === "yearly" ? razorpay_order_id : razorpay_subscription_id;
