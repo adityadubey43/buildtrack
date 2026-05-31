@@ -25,14 +25,14 @@ services:
       - key: CLOUDINARY_URL
         sync: false
       - key: RAZORPAY_KEY_ID
-        value: rzp_live_Svewe29nCOCstC
+        value: rzp_test_SvpTKXFJEsqUC9
       - key: RAZORPAY_KEY_SECRET
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
       - key: RAZORPAY_PLAN_BASIC
-        value: plan_Svey9RvZxpm8kM
+        value: plan_SvpXN7bELPEoFz
       - key: RAZORPAY_PLAN_PRO
-        value: plan_Svey9fGPoduZRy
+        value: plan_SvpXNM2rj8tMRB
       - key: RAZORPAY_PLAN_ENTERPRISE
-        value: plan_Svey9wqDSmphVo
+        value: plan_SvpXNcTabwq9ZK
