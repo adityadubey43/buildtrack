@@ -2,6 +2,7 @@ const Razorpay = require("razorpay");
 const crypto   = require("crypto");
 const Tenant   = require("../models/Tenant");
 const User     = require("../models/User");
+const PlatformConfig = require("../models/PlatformConfig");
 const { generateToken, generateTenantId, generateUniqueSlug } = require("../utils/generateToken");
 
 // ── Lazy Razorpay instance ────────────────────────────────────────────────────
@@ -15,13 +16,38 @@ function getRzp() {
   return _rzp;
 }
 
-// ── Pricing ───────────────────────────────────────────────────────────────────
-const MONTHLY_PRICES = { basic: 999,  pro: 2499,  enterprise: 4999 };
-const YEARLY_PRICES  = {
-  basic:      Math.round(999  * 12 * 0.9),  // ₹10,789
-  pro:        Math.round(2499 * 12 * 0.9),  // ₹26,989
-  enterprise: Math.round(4999 * 12 * 0.9),  // ₹53,989
-};
+// ── Dynamic pricing from DB (falls back to hardcoded defaults) ────────────────
+async function getLivePrices() {
+  const cfg = await PlatformConfig.findOne({ key: "main" }).lean();
+  const disc = cfg?.pricing?.yearlyDiscount ?? 10;
+  const monthly = {
+    basic:      cfg?.pricing?.basic      ?? 999,
+    pro:        cfg?.pricing?.pro        ?? 2499,
+    enterprise: cfg?.pricing?.enterprise ?? 4999,
+  };
+  const yearly = {
+    basic:      Math.round(monthly.basic      * 12 * (1 - disc / 100)),
+    pro:        Math.round(monthly.pro        * 12 * (1 - disc / 100)),
+    enterprise: Math.round(monthly.enterprise * 12 * (1 - disc / 100)),
+  };
+  return { monthly, yearly };
+}
+
+// ── Razorpay plan ID lookup — DB first, then env fallback ────────────────────
+async function getRazorpayPlanId(plan) {
+  try {
+    const cfg = await PlatformConfig.findOne({ key: "main" }, "razorpayPlanIds").lean();
+    const dbId = cfg?.razorpayPlanIds?.[plan];
+    if (dbId) return dbId;
+  } catch (e) {
+    console.warn("[getRazorpayPlanId] DB lookup failed:", e.message);
+  }
+  // Fallback to env
+  const key = plan.toUpperCase();
+  return process.env[`RAZORPAY_PLAN_${key}_MONTHLY`]
+      || process.env[`RAZORPAY_PLAN_${key}`]
+      || null;
+}
 
 // ── HMAC helpers ──────────────────────────────────────────────────────────────
 // Subscription:  HMAC( payment_id | subscription_id , secret )
@@ -68,9 +94,10 @@ function userPayload(user, tenant) {
 // GET /api/razorpay/health
 // ─────────────────────────────────────────────────────────────────────────────
 const health = async (req, res) => {
-  // Check for monthly plan env vars (yearly are optional)
-  const missing = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_PLAN_BASIC_MONTHLY", "RAZORPAY_PLAN_PRO_MONTHLY", "RAZORPAY_PLAN_ENTERPRISE_MONTHLY"]
-    .filter((k) => !process.env[k]);
+  const planChecks = await Promise.all(["basic", "pro", "enterprise"].map(async (p) => ({ p, id: await getRazorpayPlanId(p) })));
+  const missingPlans = planChecks.filter((x) => !x.id).map((x) => x.p);
+  const missingCore  = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"].filter((k) => !process.env[k]);
+  const missing = [...missingCore, ...missingPlans.map((p) => `RAZORPAY_PLAN_${p.toUpperCase()}[_MONTHLY]`)];
   if (missing.length) return res.status(400).json({ success: false, message: `Missing env vars: ${missing.join(", ")}` });
   try {
     await getRzp().plans.all({ count: 1 });
@@ -88,8 +115,8 @@ const createSubscription = async (req, res) => {
     const { plan = "pro", email, companyName, phone = "9999999999" } = req.body;
     if (!email || !companyName) return res.status(400).json({ success: false, message: "email and companyName are required." });
 
-    const planId = process.env[`RAZORPAY_PLAN_${plan.toUpperCase()}_MONTHLY`];
-    if (!planId) return res.status(400).json({ success: false, message: `Plan "${plan}" (monthly) not configured. Set RAZORPAY_PLAN_${plan.toUpperCase()}_MONTHLY in env.` });
+    const planId = await getRazorpayPlanId(plan);
+    if (!planId) return res.status(400).json({ success: false, message: `Plan "${plan}" not configured. Save pricing from the Platform Dashboard first.` });
 
     // Create or get customer for recurring payments
     let customerId;
@@ -109,18 +136,19 @@ const createSubscription = async (req, res) => {
 
     const sub = await getRzp().subscriptions.create({
       plan_id: planId,
-      total_count: 0,  // 0 = unlimited renewals for monthly subscriptions
+      total_count: 120,  // 120 months = 10 years (Razorpay requires >= 1)
       customer_notify: 1,
       customer_id: customerId,
       expire_by: Math.floor((new Date().getTime() + 30 * 24 * 60 * 60 * 1000) / 1000), // 30 days to authorize
       notes: { company: companyName, email, plan, billing: "monthly" },
     });
 
+    const { monthly } = await getLivePrices();
     res.json({
       success: true,
       subscriptionId: sub.id,
       keyId: process.env.RAZORPAY_KEY_ID,
-      amount: MONTHLY_PRICES[plan] * 100,
+      amount: (monthly[plan] ?? 999) * 100,
       plan,
       billing: "monthly",
       customerId,
@@ -140,7 +168,8 @@ const createOrder = async (req, res) => {
     const { plan = "pro", email, companyName } = req.body;
     if (!email || !companyName) return res.status(400).json({ success: false, message: "email and companyName are required." });
 
-    const amount = YEARLY_PRICES[plan];
+    const { yearly } = await getLivePrices();
+    const amount = yearly[plan];
     if (!amount) return res.status(400).json({ success: false, message: `Unknown plan "${plan}".` });
 
     const order = await getRzp().orders.create({

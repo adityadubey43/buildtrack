@@ -93,8 +93,31 @@ mongoose
     serverSelectionTimeoutMS: 10000,
     family: 4,
   })
-  .then(() => {
+  .then(async () => {
     console.log("✅ MongoDB Atlas connected");
+
+    // ── Seed PlatformConfig with env plan IDs if DB has none yet ──
+    try {
+      const PlatformConfig = require("./models/PlatformConfig");
+      const cfg = await PlatformConfig.findOne({ key: "main" });
+      const hasDbPlans = cfg?.razorpayPlanIds?.pro;
+      if (!hasDbPlans) {
+        const envBasic      = process.env.RAZORPAY_PLAN_BASIC      || process.env.RAZORPAY_PLAN_BASIC_MONTHLY      || "";
+        const envPro        = process.env.RAZORPAY_PLAN_PRO        || process.env.RAZORPAY_PLAN_PRO_MONTHLY        || "";
+        const envEnterprise = process.env.RAZORPAY_PLAN_ENTERPRISE || process.env.RAZORPAY_PLAN_ENTERPRISE_MONTHLY || "";
+        if (envBasic || envPro || envEnterprise) {
+          await PlatformConfig.findOneAndUpdate(
+            { key: "main" },
+            { $set: { "razorpayPlanIds.basic": envBasic, "razorpayPlanIds.pro": envPro, "razorpayPlanIds.enterprise": envEnterprise } },
+            { upsert: true }
+          );
+          console.log("✅ Seeded Razorpay plan IDs from env into PlatformConfig");
+        }
+      }
+    } catch (e) {
+      console.warn("⚠  Could not seed PlatformConfig plan IDs:", e.message);
+    }
+
     app.listen(PORT, () => {
       console.log(`🚀 BuildTrack API running on http://localhost:${PORT}`);
       console.log(`📊 Health check: http://localhost:${PORT}/health`);

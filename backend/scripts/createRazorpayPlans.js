@@ -1,103 +1,125 @@
 /**
- * One-time setup: creates monthly + yearly subscription plans in Razorpay.
- * Yearly plans have a 10% discount baked into the amount.
+ * Creates (or recreates) Razorpay subscription plans using the current
+ * pricing stored in PlatformConfig (set via the platform dashboard).
  *
- * Usage: node scripts/createRazorpayPlans.js
+ * Falls back to env vars PLAN_PRICE_BASIC / PLAN_PRICE_PRO / PLAN_PRICE_ENTERPRISE
+ * if no DB config exists, then to hardcoded defaults (999 / 2499 / 4999).
+ *
+ * Usage:
+ *   node scripts/createRazorpayPlans.js
+ *
+ * After running, copy the printed env lines into your .env and restart the backend.
  */
 require("dotenv").config();
-const Razorpay = require("razorpay");
+const Razorpay  = require("razorpay");
+const mongoose  = require("mongoose");
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+async function getPrices() {
+  // Try DB first
+  try {
+    await mongoose.connect(process.env.MONGODB_URI);
+    const PlatformConfig = require("../src/models/PlatformConfig");
+    const cfg = await PlatformConfig.findOne({ key: "main" }).lean();
+    await mongoose.disconnect();
+    if (cfg?.pricing) {
+      console.log("✔  Prices loaded from PlatformConfig (MongoDB)\n");
+      return {
+        basic:          cfg.pricing.basic,
+        pro:            cfg.pricing.pro,
+        enterprise:     cfg.pricing.enterprise,
+        yearlyDiscount: cfg.pricing.yearlyDiscount ?? 10,
+      };
+    }
+  } catch (e) {
+    console.warn("⚠  Could not read DB pricing:", e.message, "— falling back to env/defaults\n");
+  }
 
-// Monthly prices in ₹
-const MONTHLY = { basic: 999, pro: 2499, enterprise: 4999 };
-
-// Yearly = monthly × 12 × 0.9 (10% off), rounded to nearest rupee
-const yearly = (monthly) => Math.round(monthly * 12 * 0.9);
-
-const PLANS = [
-  // ── Monthly ──────────────────────────────────────────────────────────────
-  {
-    envKey: "RAZORPAY_PLAN_BASIC_MONTHLY",
-    body: {
-      period: "monthly", interval: 1,
-      item: { name: "BuildTrack Basic (Monthly)", amount: MONTHLY.basic * 100, currency: "INR", description: "Up to 3 projects, 25 workers — billed monthly" },
-      notes: { plan: "basic", billing: "monthly" },
-    },
-  },
-  {
-    envKey: "RAZORPAY_PLAN_PRO_MONTHLY",
-    body: {
-      period: "monthly", interval: 1,
-      item: { name: "BuildTrack Pro (Monthly)", amount: MONTHLY.pro * 100, currency: "INR", description: "Unlimited projects & workers — billed monthly" },
-      notes: { plan: "pro", billing: "monthly" },
-    },
-  },
-  {
-    envKey: "RAZORPAY_PLAN_ENTERPRISE_MONTHLY",
-    body: {
-      period: "monthly", interval: 1,
-      item: { name: "BuildTrack Enterprise (Monthly)", amount: MONTHLY.enterprise * 100, currency: "INR", description: "Large firms, custom SLA — billed monthly" },
-      notes: { plan: "enterprise", billing: "monthly" },
-    },
-  },
-
-  // ── Yearly (10% off, billed as one annual charge) ─────────────────────
-  {
-    envKey: "RAZORPAY_PLAN_BASIC_YEARLY",
-    body: {
-      period: "yearly", interval: 1,
-      item: { name: "BuildTrack Basic (Yearly)", amount: yearly(MONTHLY.basic) * 100, currency: "INR", description: `Up to 3 projects, 25 workers — ₹${yearly(MONTHLY.basic)}/year (10% off)` },
-      notes: { plan: "basic", billing: "yearly" },
-    },
-  },
-  {
-    envKey: "RAZORPAY_PLAN_PRO_YEARLY",
-    body: {
-      period: "yearly", interval: 1,
-      item: { name: "BuildTrack Pro (Yearly)", amount: yearly(MONTHLY.pro) * 100, currency: "INR", description: `Unlimited projects & workers — ₹${yearly(MONTHLY.pro)}/year (10% off)` },
-      notes: { plan: "pro", billing: "yearly" },
-    },
-  },
-  {
-    envKey: "RAZORPAY_PLAN_ENTERPRISE_YEARLY",
-    body: {
-      period: "yearly", interval: 1,
-      item: { name: "BuildTrack Enterprise (Yearly)", amount: yearly(MONTHLY.enterprise) * 100, currency: "INR", description: `Large firms, custom SLA — ₹${yearly(MONTHLY.enterprise)}/year (10% off)` },
-      notes: { plan: "enterprise", billing: "yearly" },
-    },
-  },
-];
+  // Fall back to env vars or hardcoded defaults
+  return {
+    basic:          Number(process.env.PLAN_PRICE_BASIC)      || 999,
+    pro:            Number(process.env.PLAN_PRICE_PRO)        || 2499,
+    enterprise:     Number(process.env.PLAN_PRICE_ENTERPRISE) || 4999,
+    yearlyDiscount: Number(process.env.PLAN_YEARLY_DISCOUNT)  || 10,
+  };
+}
 
 (async () => {
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-    console.error("❌ RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be set in .env");
+    console.error("❌  RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be set in .env");
     process.exit(1);
   }
 
-  console.log(`Creating Razorpay plans (${process.env.RAZORPAY_KEY_ID.startsWith("rzp_live") ? "LIVE" : "TEST"} mode)...\n`);
+  const { basic, pro, enterprise, yearlyDiscount } = await getPrices();
+  const disc = yearlyDiscount / 100;
+
+  const MONTHLY = { basic, pro, enterprise };
+  const YEARLY  = {
+    basic:      Math.round(basic      * 12 * (1 - disc)),
+    pro:        Math.round(pro        * 12 * (1 - disc)),
+    enterprise: Math.round(enterprise * 12 * (1 - disc)),
+  };
+
+  console.log(`Prices to use:`);
+  console.log(`  Basic:      ₹${basic}/mo  · ₹${YEARLY.basic}/yr`);
+  console.log(`  Pro:        ₹${pro}/mo  · ₹${YEARLY.pro}/yr`);
+  console.log(`  Enterprise: ₹${enterprise}/mo  · ₹${YEARLY.enterprise}/yr`);
+  console.log(`  Yearly discount: ${yearlyDiscount}%\n`);
+
+  const rzp = new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+
+  const mode = process.env.RAZORPAY_KEY_ID.startsWith("rzp_live") ? "LIVE" : "TEST";
+  console.log(`Creating Razorpay plans (${mode} mode)...\n`);
+
+  const PLANS = [
+    {
+      envKey: "RAZORPAY_PLAN_BASIC",
+      body: {
+        period: "monthly", interval: 1,
+        item: { name: "BuildTrack Basic (Monthly)", amount: MONTHLY.basic * 100, currency: "INR",
+                description: `Up to 3 projects, 25 workers — ₹${MONTHLY.basic}/month` },
+        notes: { plan: "basic", billing: "monthly" },
+      },
+    },
+    {
+      envKey: "RAZORPAY_PLAN_PRO",
+      body: {
+        period: "monthly", interval: 1,
+        item: { name: "BuildTrack Pro (Monthly)", amount: MONTHLY.pro * 100, currency: "INR",
+                description: `Unlimited projects & workers — ₹${MONTHLY.pro}/month` },
+        notes: { plan: "pro", billing: "monthly" },
+      },
+    },
+    {
+      envKey: "RAZORPAY_PLAN_ENTERPRISE",
+      body: {
+        period: "monthly", interval: 1,
+        item: { name: "BuildTrack Enterprise (Monthly)", amount: MONTHLY.enterprise * 100, currency: "INR",
+                description: `Large firms, custom SLA — ₹${MONTHLY.enterprise}/month` },
+        notes: { plan: "enterprise", billing: "monthly" },
+      },
+    },
+  ];
 
   const lines = [];
   for (const plan of PLANS) {
     try {
-      const created = await razorpay.plans.create(plan.body);
+      const created = await rzp.plans.create(plan.body);
       lines.push(`${plan.envKey}=${created.id}`);
-      console.log(`✅ ${plan.body.item.name}`);
-      console.log(`   Plan ID : ${created.id}`);
-      console.log(`   Amount  : ₹${plan.body.item.amount / 100}/${plan.body.period}`);
-      console.log();
+      console.log(`✅  ${plan.body.item.name}`);
+      console.log(`    Plan ID : ${created.id}`);
+      console.log(`    Amount  : ₹${plan.body.item.amount / 100}/month\n`);
     } catch (err) {
-      console.error(`❌ Failed to create ${plan.body.item.name}:`, err.error?.description || err.message);
+      console.error(`❌  Failed to create ${plan.body.item.name}:`, err.error?.description || err.message);
     }
   }
 
   if (lines.length) {
-    console.log("─────────────────────────────────────────────");
-    console.log("Add these lines to your .env:\n");
+    console.log("─────────────────────────────────────────────────────");
+    console.log("Copy these into your .env and restart the backend:\n");
     lines.forEach((l) => console.log(l));
-    console.log("\nThen restart the backend server.");
+    console.log("\n─────────────────────────────────────────────────────");
   }
 })();
