@@ -4,7 +4,7 @@ const attendanceSchema = new mongoose.Schema(
   {
     tenantId: { type: String, required: true, index: true },
     worker: { type: mongoose.Schema.Types.ObjectId, ref: "Worker", required: true },
-    project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", required: true },
+    project: { type: mongoose.Schema.Types.ObjectId, ref: "Project" },
     // Denormalised from the worker so labour & employee attendance stay strictly separate
     attendanceType: {
       type: String,

@@ -28,6 +28,7 @@ const workerSchema = new mongoose.Schema(
     monthlySalary: { type: Number, default: 0 },
     contractAmount: { type: Number, default: 0 },
     assignedSite: { type: mongoose.Schema.Types.ObjectId, ref: "Project" },
+    assignedProjects: [{ type: mongoose.Schema.Types.ObjectId, ref: "Project" }],
     idProof: { type: String },
     photo: { type: String },
     isActive: { type: Boolean, default: true },

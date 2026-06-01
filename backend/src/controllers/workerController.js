@@ -4,7 +4,8 @@ const Worker = require("../models/Worker");
 const getMyWorker = async (req, res, next) => {
   try {
     const worker = await Worker.findOne({ tenantId: req.tenantId, userId: req.user._id })
-      .populate("assignedSite", "name location");
+      .populate("assignedSite", "name location")
+      .populate("assignedProjects", "name location");
     if (!worker) return res.status(404).json({ success: false, message: "You are not registered as a worker." });
     res.json({ success: true, data: worker });
   } catch (err) {
@@ -19,7 +20,10 @@ const getWorkers = async (req, res, next) => {
     const filter = { tenantId: req.tenantId };
     if (workerType) filter.workerType = workerType;
     if (role) filter.role = role;
-    if (project) filter.assignedSite = project;
+    if (project) filter.$or = [
+      { assignedProjects: project },
+      { assignedSite: project },
+    ];
     // Default to active workers only; pass isActive=all to include everyone
     if (isActive === undefined) filter.isActive = true;
     else if (isActive !== "all") filter.isActive = isActive === "true";
@@ -27,6 +31,7 @@ const getWorkers = async (req, res, next) => {
 
     const workers = await Worker.find(filter)
       .populate("assignedSite", "name location")
+      .populate("assignedProjects", "name location")
       .populate("userId", "email")
       .sort({ name: 1 });
 
@@ -50,6 +55,7 @@ const getWorker = async (req, res, next) => {
   try {
     const worker = await Worker.findOne({ _id: req.params.id, tenantId: req.tenantId })
       .populate("assignedSite", "name location")
+      .populate("assignedProjects", "name location")
       .populate("userId", "email");
     if (!worker) return res.status(404).json({ success: false, message: "Worker not found." });
     
@@ -113,6 +119,7 @@ const createWorker = async (req, res, next) => {
       monthlySalary: Number(monthlySalary) || 0,
       contractAmount: Number(contractAmount) || 0,
       assignedSite,
+      assignedProjects: req.body.assignedProjects,
       joiningDate,
       userId,
     });
@@ -171,7 +178,9 @@ const updateWorker = async (req, res, next) => {
       { _id: req.params.id, tenantId: req.tenantId },
       workerData,
       { new: true, runValidators: true }
-    ).populate("userId", "email");
+    ).populate("assignedSite", "name location")
+      .populate("assignedProjects", "name location")
+      .populate("userId", "email");
     
     const workerObj = updatedWorker.toObject();
     if (updatedWorker.userId && updatedWorker.userId.email) {

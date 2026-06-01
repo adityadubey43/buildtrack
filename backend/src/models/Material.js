@@ -7,6 +7,8 @@ const materialSchema = new mongoose.Schema(
     category: {
       type: String,
       enum: ["cement", "steel", "sand", "aggregate", "bricks", "wood", "electrical", "plumbing", "finishing", "other"],
+      lowercase: true,
+      trim: true,
       default: "other",
     },
     unit: { type: String, required: true },
@@ -18,6 +20,7 @@ const materialSchema = new mongoose.Schema(
     lastPurchasePrice: { type: Number, default: 0 },
     lastOrderDate: { type: Date },
     onOrder: { type: Number, default: 0 },
+    totalUsed: { type: Number, default: 0 },
     stockAlertSent: { type: Boolean, default: false },
   },
   { timestamps: true }

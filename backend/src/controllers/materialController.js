@@ -6,7 +6,7 @@ const getMaterials = async (req, res, next) => {
     const { project, category, lowStock } = req.query;
     const filter = { tenantId: req.tenantId };
     if (project) filter.project = project;
-    if (category) filter.category = category;
+    if (category) filter.category = category.toString().toLowerCase();
     if (lowStock === "true") filter.$expr = { $lte: ["$currentStock", "$minimumStock"] };
 
     const materials = await Material.find(filter)
@@ -66,6 +66,11 @@ const addTransaction = async (req, res, next) => {
     const material = await Material.findOne({ _id: req.params.id, tenantId: req.tenantId });
     if (!material) return res.status(404).json({ success: false, message: "Material not found." });
 
+    // Validate user
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ success: false, message: "User not authenticated." });
+    }
+
     // Update stock
     if (type === "purchase" || type === "return") {
       material.currentStock += Number(quantity);
@@ -76,6 +81,7 @@ const addTransaction = async (req, res, next) => {
         return res.status(400).json({ success: false, message: "Insufficient stock." });
       }
       material.currentStock -= Number(quantity);
+      if (type === "usage") material.totalUsed += Number(quantity);
     }
 
     material.stockAlertSent = false;
@@ -84,19 +90,31 @@ const addTransaction = async (req, res, next) => {
     const transaction = await MaterialTransaction.create({
       tenantId: req.tenantId,
       material: material._id,
-      project, type,
+      project: project || null,
+      type,
       quantity: Number(quantity),
       unit: material.unit,
       rate: Number(rate) || 0,
       totalCost: (Number(rate) || 0) * Number(quantity),
-      vendor, invoiceNumber,
+      vendor: vendor || null,
+      invoiceNumber: invoiceNumber || null,
       date: date ? new Date(date) : new Date(),
       recordedBy: req.user._id,
-      notes,
+      notes: notes || null,
     });
 
-    res.status(201).json({ success: true, message: "Transaction recorded.", data: { material, transaction } });
+    // Populate and return full transaction data
+    const populatedTransaction = await MaterialTransaction.findById(transaction._id)
+      .populate("material", "name category unit")
+      .populate("recordedBy", "name role");
+
+    res.status(201).json({ 
+      success: true, 
+      message: "Transaction recorded successfully.", 
+      data: { material, transaction: populatedTransaction } 
+    });
   } catch (err) {
+    console.error("Transaction error:", err);
     next(err);
   }
 };

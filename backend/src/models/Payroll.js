@@ -3,6 +3,18 @@ const mongoose = require("mongoose");
 const payrollEntrySchema = new mongoose.Schema({
   worker: { type: mongoose.Schema.Types.ObjectId, ref: "Worker", required: true },
   project: { type: mongoose.Schema.Types.ObjectId, ref: "Project" },
+  projectBreakdown: [
+    {
+      project: { type: mongoose.Schema.Types.ObjectId, ref: "Project" },
+      daysWorked: { type: Number, default: 0 },
+      presentDays: { type: Number, default: 0 },
+      absentDays: { type: Number, default: 0 },
+      halfDays: { type: Number, default: 0 },
+      leaveDays: { type: Number, default: 0 },
+      overtimeHours: { type: Number, default: 0 },
+      amount: { type: Number, default: 0 },
+    },
+  ],
   daysWorked: { type: Number, default: 0 },
   halfDays: { type: Number, default: 0 },
   presentDays: { type: Number, default: 0 },

@@ -12,6 +12,7 @@ const getPayrolls = async (req, res, next) => {
     const payrolls = await Payroll.find(filter)
       .populate("entries.worker", "name role dailyWage monthlySalary wageType workerType")
       .populate("entries.project", "name")
+      .populate("entries.projectBreakdown.project", "name")
       .populate("project", "name location")
       .sort({ weekStartDate: -1 });
     res.json({ success: true, count: payrolls.length, data: payrolls });
@@ -26,6 +27,7 @@ const getPayroll = async (req, res, next) => {
     const payroll = await Payroll.findOne({ _id: req.params.id, tenantId: req.tenantId })
       .populate("entries.worker", "name role phone dailyWage monthlySalary wageType workerType")
       .populate("entries.project", "name location")
+      .populate("entries.projectBreakdown.project", "name location")
       .populate("project", "name location");
     if (!payroll) return res.status(404).json({ success: false, message: "Payroll not found." });
     res.json({ success: true, data: payroll });
@@ -75,74 +77,129 @@ const calculatePayroll = async (req, res, next) => {
       });
     }
 
-    // Group by worker
+    // Group by worker and project
     const map = {};
     for (const r of attendanceRecords) {
       if (!r.worker) continue;
-      const id = r.worker._id.toString();
-      if (!map[id]) {
-        map[id] = {
+      const workerId = r.worker._id.toString();
+      if (!map[workerId]) {
+        map[workerId] = {
           worker: r.worker._id,
-          project: r.project,
           workerObj: r.worker,
-          present: 0, absent: 0, halfDays: 0, late: 0, leave: 0,
+          projectMap: {},
+        };
+      }
+
+      const m = map[workerId];
+      const projKey = r.project?._id?.toString() || "unassigned";
+      if (!m.projectMap[projKey]) {
+        m.projectMap[projKey] = {
+          project: r.project,
+          present: 0,
+          absent: 0,
+          halfDays: 0,
+          late: 0,
+          leave: 0,
           overtimeHours: 0,
         };
       }
-      const m = map[id];
-      if (r.status === "present") m.present += 1;
-      else if (r.status === "absent") m.absent += 1;
-      else if (r.status === "half-day") m.halfDays += 1;
-      else if (r.status === "late") m.late += 1;
-      else if (r.status === "leave") m.leave += 1;
-      m.overtimeHours += r.overtimeHours || 0;
+
+      const proj = m.projectMap[projKey];
+      if (r.status === "present") proj.present += 1;
+      else if (r.status === "absent") proj.absent += 1;
+      else if (r.status === "half-day") proj.halfDays += 1;
+      else if (r.status === "late") proj.late += 1;
+      else if (r.status === "leave") proj.leave += 1;
+      proj.overtimeHours += r.overtimeHours || 0;
     }
 
     let entries;
 
     if (workerType === "labour") {
-      // Labour: days worked × daily wage + overtime
+      // Labour: days worked × daily wage + overtime, broken down by project when needed.
       entries = Object.values(map).map((w) => {
         const dailyWage = w.workerObj.dailyWage || 0;
-        const daysWorked = w.present + w.late;
-        const basicAmount = daysWorked * dailyWage + w.halfDays * dailyWage * 0.5;
-        const overtimeRate = dailyWage > 0 ? (dailyWage / 8) * 1.5 : 0;
-        const overtimeAmount = w.overtimeHours * overtimeRate;
-        const totalAmount = Math.round(basicAmount + overtimeAmount);
+        const breakdown = Object.values(w.projectMap).map((proj) => {
+          const presentDays = proj.present;
+          const daysWorked = proj.present + proj.late + proj.halfDays * 0.5;
+          const basicAmount = presentDays * dailyWage + proj.late * dailyWage + proj.halfDays * dailyWage * 0.5;
+          const overtimeRate = dailyWage > 0 ? (dailyWage / 8) * 1.5 : 0;
+          const overtimeAmount = proj.overtimeHours * overtimeRate;
+          const amount = Math.round(basicAmount + overtimeAmount);
+          return {
+            project: proj.project,
+            daysWorked,
+            presentDays,
+            absentDays: proj.absent,
+            halfDays: proj.halfDays,
+            leaveDays: proj.leave,
+            overtimeHours: proj.overtimeHours,
+            amount,
+          };
+        });
+
+        const totalAmount = breakdown.reduce((s, b) => s + b.amount, 0);
         return {
           worker: w.worker,
-          project: w.project,
-          presentDays: w.present,
-          daysWorked,
-          halfDays: w.halfDays,
-          absentDays: w.absent,
-          leaveDays: w.leave,
-          overtimeHours: w.overtimeHours,
+          project: breakdown.length === 1 ? breakdown[0].project : undefined,
+          projectBreakdown: breakdown,
+          presentDays: breakdown.reduce((s, b) => s + b.presentDays, 0),
+          daysWorked: breakdown.reduce((s, b) => s + b.daysWorked, 0),
+          halfDays: breakdown.reduce((s, b) => s + b.halfDays, 0),
+          absentDays: breakdown.reduce((s, b) => s + b.absentDays, 0),
+          leaveDays: breakdown.reduce((s, b) => s + b.leaveDays, 0),
+          overtimeHours: breakdown.reduce((s, b) => s + b.overtimeHours, 0),
           dailyWage,
-          basicAmount: Math.round(basicAmount),
-          overtimeAmount: Math.round(overtimeAmount),
+          basicAmount: breakdown.reduce((s, b) => s + Math.round((b.presentDays + b.late) * dailyWage + b.halfDays * dailyWage * 0.5), 0),
+          overtimeAmount: breakdown.reduce((s, b) => s + Math.round(b.overtimeHours * (dailyWage > 0 ? (dailyWage / 8) * 1.5 : 0)), 0),
           deductions: 0,
           totalAmount,
           status: "pending",
         };
       });
     } else {
-      // Employee: monthly salary − deduction for absent days (leaves are paid)
+      // Employee: monthly salary − deduction for absent days (leaves are paid), allocate amount across projects.
       entries = Object.values(map).map((w) => {
         const monthlySalary = w.workerObj.monthlySalary || 0;
-        const markedDays = w.present + w.absent + w.halfDays + w.late + w.leave;
-        const perDay = markedDays > 0 ? monthlySalary / markedDays : 0;
-        // Absent days deduct; half-days deduct half; leaves are paid
-        const deductions = Math.round(perDay * (w.absent + w.halfDays * 0.5));
+        const totalMarkedDays = Object.values(w.projectMap).reduce(
+          (sum, proj) => sum + proj.present + proj.absent + proj.halfDays + proj.late + proj.leave,
+          0
+        );
+        const perDay = totalMarkedDays > 0 ? monthlySalary / totalMarkedDays : 0;
+        const deductions = Math.round(perDay * (Object.values(w.projectMap).reduce(
+          (sum, proj) => sum + proj.absent + proj.halfDays * 0.5,
+          0
+        )));
         const totalAmount = Math.round(monthlySalary - deductions);
+
+        let remainder = totalAmount;
+        const breakdown = Object.values(w.projectMap).map((proj, index, list) => {
+          const projectDays = proj.present + proj.absent + proj.halfDays + proj.late + proj.leave;
+          const amount = index === list.length - 1
+            ? remainder
+            : Math.round(totalAmount * (projectDays / Math.max(totalMarkedDays, 1)));
+          remainder -= amount;
+          return {
+            project: proj.project,
+            daysWorked: proj.present + proj.late + proj.halfDays * 0.5,
+            presentDays: proj.present,
+            absentDays: proj.absent,
+            halfDays: proj.halfDays,
+            leaveDays: proj.leave,
+            overtimeHours: 0,
+            amount,
+          };
+        });
+
         return {
           worker: w.worker,
-          project: w.project,
-          presentDays: w.present,
-          daysWorked: w.present + w.late,
-          halfDays: w.halfDays,
-          absentDays: w.absent,
-          leaveDays: w.leave,
+          project: breakdown.length === 1 ? breakdown[0].project : undefined,
+          projectBreakdown: breakdown,
+          presentDays: Object.values(w.projectMap).reduce((s, proj) => s + proj.present, 0),
+          daysWorked: Object.values(w.projectMap).reduce((s, proj) => s + proj.present + proj.late + proj.halfDays * 0.5, 0),
+          halfDays: Object.values(w.projectMap).reduce((s, proj) => s + proj.halfDays, 0),
+          absentDays: Object.values(w.projectMap).reduce((s, proj) => s + proj.absent, 0),
+          leaveDays: Object.values(w.projectMap).reduce((s, proj) => s + proj.leave, 0),
           overtimeHours: 0,
           monthlySalary,
           basicAmount: monthlySalary,

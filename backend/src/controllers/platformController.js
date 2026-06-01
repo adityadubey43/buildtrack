@@ -121,7 +121,7 @@ const getStats = async (req, res, next) => {
       Tenant.countDocuments({}),
       Tenant.countDocuments({ createdAt: { $gte: startOfMonth } }),
       Tenant.aggregate([{ $group: { _id: "$planStatus", count: { $sum: 1 } } }]),
-      Tenant.aggregate([{ $group: { _id: "$plan", count: { $sum: 1 } } }]),
+      Tenant.aggregate([{ $match: { planStatus: "active" } }, { $group: { _id: "$plan", count: { $sum: 1 } } }]),
       User.countDocuments({}),
       Worker.countDocuments({}),
       Project.countDocuments({}),
