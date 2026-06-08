@@ -26,7 +26,7 @@ app.use(cors({
       exactOrigins.includes(origin) ||
       /\.vercel\.app$/.test(origin) ||
       /\.netlify\.app$/.test(origin);
-    return cb(null, ok || origin); // reflect known origins; token auth means this is safe
+    return cb(ok ? null : new Error("CORS: origin not allowed"), ok ? origin : false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],

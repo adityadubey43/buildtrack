@@ -350,10 +350,13 @@ const webhook = async (req, res) => {
     const sig    = req.headers["x-razorpay-signature"];
     const raw    = req.body;
 
-    if (secret && sig) {
-      const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
-      if (expected !== sig) return res.status(400).json({ message: "Invalid webhook signature." });
+    if (!secret) {
+      console.error("[webhook] RAZORPAY_WEBHOOK_SECRET is not set — rejecting all webhook calls.");
+      return res.status(400).json({ message: "Webhook not configured." });
     }
+    if (!sig) return res.status(400).json({ message: "Missing webhook signature." });
+    const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
+    if (expected !== sig) return res.status(400).json({ message: "Invalid webhook signature." });
 
     const { event, payload } = JSON.parse(raw.toString());
     const subscriptionId = payload?.subscription?.entity?.id;
