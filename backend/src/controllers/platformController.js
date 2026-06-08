@@ -61,12 +61,28 @@ function isYearlyTenant(tenant) {
   return false;
 }
 
+// ✅ FIXED: Get actual revenue based on price they signed up at (immutable)
+// Falls back to current pricing for legacy tenants without subscriptionPrice
 function tenantRevenue(tenant, monthly, yearly) {
+  // If subscriptionPrice is stored, use it (actual amount paid)
+  if (tenant.subscriptionPrice?.amount) {
+    return tenant.subscriptionPrice.amount;
+  }
+  // Fallback: Calculate from current pricing (for legacy data)
   const prices = isYearlyTenant(tenant) ? yearly : monthly;
   return prices[tenant.plan] || 0;
 }
 
+// ✅ FIXED: Get actual MRR based on price they signed up at (immutable)
 function tenantMRR(tenant, monthly, yearly) {
+  // If subscriptionPrice is stored, use it
+  if (tenant.subscriptionPrice?.amount) {
+    if (tenant.subscriptionPrice.billing === "yearly") {
+      return Math.round(tenant.subscriptionPrice.amount / 12);
+    }
+    return tenant.subscriptionPrice.amount; // monthly
+  }
+  // Fallback: Calculate from current pricing (for legacy data)
   if (isYearlyTenant(tenant)) {
     return Math.round((yearly[tenant.plan] || 0) / 12);
   }
@@ -132,7 +148,8 @@ const getStats = async (req, res, next) => {
         { $group: { _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } }, count: { $sum: 1 } } },
         { $sort: { "_id.y": 1, "_id.m": 1 } },
       ]),
-      Tenant.find({ planStatus: "active" }, "plan subscriptionEndsAt trialEndsAt planStatus"),
+      // ✅ IMPORTANT: Fetch subscriptionPrice to calculate based on historical pricing
+      Tenant.find({ planStatus: "active" }, "plan subscriptionEndsAt trialEndsAt planStatus subscriptionPrice"),
       getMonthlyPrices(),
     ]);
 
@@ -144,9 +161,10 @@ const getStats = async (req, res, next) => {
     const byPlan = { basic: 0, pro: 0, enterprise: 0 };
     byPlanRaw.forEach((r) => { if (r._id) byPlan[r._id] = r.count; });
 
+    // ✅ FIXED: Now calculates based on actual prices paid (immutable), not current pricing
     const mrr = activePlanTenants.reduce((s, t) => s + tenantMRR(t, monthly, yearly), 0);
     const totalRevenue = activePlanTenants.reduce((s, t) => s + tenantRevenue(t, monthly, yearly), 0);
-    const trialTenants = await Tenant.find({ planStatus: "trial" }, "plan subscriptionEndsAt");
+    const trialTenants = await Tenant.find({ planStatus: "trial" }, "plan subscriptionEndsAt subscriptionPrice");
     const trialPipeline = trialTenants.reduce((s, t) => s + tenantMRR(t, monthly, yearly), 0);
 
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -188,6 +206,7 @@ const getCompanies = async (req, res, next) => {
     if (search) filter.companyName = { $regex: search, $options: "i" };
 
     const [tenants, userCounts, projectCounts, monthly] = await Promise.all([
+      // ✅ IMPORTANT: Fetch subscriptionPrice to calculate based on historical pricing
       Tenant.find(filter).sort({ createdAt: -1 }),
       User.aggregate([{ $group: { _id: "$tenantId", c: { $sum: 1 } } }]),
       Project.aggregate([{ $group: { _id: "$tenantId", c: { $sum: 1 } } }]),
@@ -212,7 +231,9 @@ const getCompanies = async (req, res, next) => {
       createdAt: t.createdAt,
       users: uMap[t.tenantId] || 0,
       projects: pMap[t.tenantId] || 0,
+      // ✅ FIXED: amountPaid now reflects historical pricing, not current pricing
       amountPaid: t.planStatus === "active" ? tenantRevenue(t, monthly, yearly) : 0,
+      // ✅ FIXED: MRR now reflects historical pricing, not current pricing
       mrr: t.planStatus === "active" ? tenantMRR(t, monthly, yearly) : 0,
     }));
 

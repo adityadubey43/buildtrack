@@ -140,13 +140,62 @@ const createInvoice = async (req, res, next) => {
 // PUT /api/invoices/:id
 const updateInvoice = async (req, res, next) => {
   try {
-    const invoice = await Invoice.findOneAndUpdate(
-      { _id: req.params.id, tenantId: req.tenantId },
-      req.body,
-      { new: true }
-    );
+    const invoice = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenantId });
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found." });
-    res.json({ success: true, data: invoice });
+
+    // ✅ SAFEGUARD: Prevent retroactive changes to payment history
+    // Once an invoice has any payment record, lock down financial fields
+    const hasPaymentHistory = invoice.paidAmount > 0 || invoice.payments.length > 0;
+
+    // Define which fields can be updated after payment
+    const allowedFieldsAfterPayment = [
+      "clientName", "clientAddress", "clientGST",
+      "notes", "milestone",
+      "status", // status can change (e.g., sent, overdue) but not amounts
+    ];
+
+    // Fields that should NEVER be modified (payment history)
+    const lockedFields = ["paidAmount", "balanceAmount", "totalAmount", "items", "payments", "gstAmount", "subtotal", "gstRate"];
+
+    // Check if update contains locked fields
+    const updateKeys = Object.keys(req.body);
+    const hasLockedFields = updateKeys.some(key => lockedFields.includes(key));
+
+    if (hasPaymentHistory && hasLockedFields) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot modify payment/amount fields for invoices with payment history. Locked fields: ${lockedFields.filter(f => updateKeys.includes(f)).join(", ")}`,
+      });
+    }
+
+    // Filter updates to allowed fields if payment exists
+    let updateData = req.body;
+    if (hasPaymentHistory) {
+      updateData = {};
+      allowedFieldsAfterPayment.forEach(field => {
+        if (field in req.body) {
+          updateData[field] = req.body[field];
+        }
+      });
+      
+      // Warn if locked fields were provided
+      const skippedFields = updateKeys.filter(k => !allowedFieldsAfterPayment.includes(k) && !lockedFields.includes(k));
+      if (skippedFields.length > 0) {
+        console.warn(`[updateInvoice] Skipped unknown fields for paid invoice: ${skippedFields.join(", ")}`);
+      }
+    }
+
+    const updated = await Invoice.findOneAndUpdate(
+      { _id: req.params.id, tenantId: req.tenantId },
+      updateData,
+      { new: true }
+    ).populate("project", "name location").populate("createdBy", "name");
+
+    res.json({
+      success: true,
+      data: updated,
+      ...(hasPaymentHistory && { message: "Invoice updated. Payment history protected." }),
+    });
   } catch (err) {
     next(err);
   }
@@ -175,8 +224,19 @@ const recordPayment = async (req, res, next) => {
       return res.status(404).json({ success: false, message: "Invoice not found." });
     }
 
+    // ✅ SAFEGUARD: Prevent overpayment
+    const newPaidAmount = invoice.paidAmount + paymentAmount;
+    if (newPaidAmount > invoice.totalAmount) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: `Payment exceeds invoice total. Invoice total: ₹${invoice.totalAmount}, Already paid: ₹${invoice.paidAmount}, New payment: ₹${paymentAmount}. Maximum allowed: ₹${invoice.totalAmount - invoice.paidAmount}`,
+      });
+    }
+
     invoice.payments.push({ amount: paymentAmount, date: paymentDate, mode: mode || "bank", reference, notes });
-    invoice.paidAmount += paymentAmount;
+    invoice.paidAmount = newPaidAmount;
     invoice.balanceAmount = Math.max(0, invoice.totalAmount - invoice.paidAmount);
 
     if (invoice.balanceAmount <= 0) {

@@ -197,6 +197,8 @@ const verifyAndSignup = async (req, res, next) => {
       razorpay_order_id,
       // signup fields
       companyName, adminName, email, password, phone, plan = "pro", billing = "monthly",
+      // ✅ IMPORTANT: amount should be sent from frontend (what they actually paid)
+      amount,
     } = req.body;
 
     if (!companyName || !adminName || !email || !password)
@@ -206,7 +208,7 @@ const verifyAndSignup = async (req, res, next) => {
 
     // ── Verify payment ────────────────────────────────────────────────────────
     console.log("[verifyAndSignup] payload:", {
-      billing, plan,
+      billing, plan, amount,
       payment_id: razorpay_payment_id || "(absent)",
       subscription_id: razorpay_subscription_id || "(absent)",
       order_id: razorpay_order_id || "(absent)",
@@ -262,6 +264,7 @@ const verifyAndSignup = async (req, res, next) => {
       ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
       : null;
 
+    // ✅ SAFEGUARD: Store the actual price they signed up at (immutable)
     const tenant = await Tenant.create({
       tenantId, slug, companyName, phone, plan,
       planStatus: "active",
@@ -269,6 +272,12 @@ const verifyAndSignup = async (req, res, next) => {
       subscriptionStartedAt: now,
       subscriptionEndsAt: endsAt,       // null for monthly (Razorpay auto-renews)
       ...(endsAt && { trialEndsAt: endsAt }),
+      // Lock in the price they paid — this NEVER changes even if platform pricing updates
+      subscriptionPrice: {
+        amount: amount ? Number(amount) : null,
+        billing,
+        capturedAt: now,
+      },
     });
 
     const user = await User.create({ tenantId, name: adminName, email: email.toLowerCase(), password, phone, role: "admin" });
@@ -291,10 +300,12 @@ const activateSubscription = async (req, res, next) => {
       razorpay_payment_id, razorpay_subscription_id, razorpay_signature,
       razorpay_order_id,
       billing = "monthly", plan,
+      // ✅ IMPORTANT: amount should be sent from frontend (what they actually paid)
+      amount,
     } = req.body;
 
     // ── Verify ──
-    console.log("[activateSub] payload:", { billing, plan, payment_id: razorpay_payment_id || "(absent)", subscription_id: razorpay_subscription_id || "(absent)", order_id: razorpay_order_id || "(absent)" });
+    console.log("[activateSub] payload:", { billing, plan, amount, payment_id: razorpay_payment_id || "(absent)", subscription_id: razorpay_subscription_id || "(absent)", order_id: razorpay_order_id || "(absent)" });
 
     if (billing === "yearly") {
       if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
@@ -334,6 +345,12 @@ const activateSubscription = async (req, res, next) => {
     } else {
       tenant.subscriptionEndsAt = null; // monthly — Razorpay handles renewal
     }
+    // ✅ SAFEGUARD: Store the actual price they signed up at (immutable)
+    tenant.subscriptionPrice = {
+      amount: amount ? Number(amount) : null,
+      billing,
+      capturedAt: now,
+    };
     await tenant.save();
 
     const user = await User.findById(req.user._id);

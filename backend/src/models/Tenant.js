@@ -24,6 +24,12 @@ const tenantSchema = new mongoose.Schema(
     razorpaySubscriptionId: { type: String, index: true, sparse: true },
     subscriptionStartedAt: { type: Date },   // when planStatus became "active"
     subscriptionEndsAt:    { type: Date },   // null = monthly (Razorpay handles), date = yearly renewal
+    // ✅ IMMUTABLE: Price they actually signed up at — never changes even if platform pricing updates
+    subscriptionPrice: {
+      amount: { type: Number },              // actual amount they pay (monthly or yearly)
+      billing: { type: String, enum: ["monthly", "yearly"] }, // billing frequency
+      capturedAt: { type: Date },            // when price was locked in
+    },
     logo: { type: String },
     isActive: { type: Boolean, default: true },
   },
