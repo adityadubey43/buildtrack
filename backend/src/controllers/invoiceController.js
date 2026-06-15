@@ -1,7 +1,183 @@
 const mongoose = require("mongoose");
 const Invoice = require("../models/Invoice");
+const Tenant = require("../models/Tenant");
 const PaymentReceived = require("../models/PaymentReceived");
-const { generateInvoiceNumber } = require("../utils/generateToken");
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a value that may arrive as a JSON string (multipart) or already as an
+ * array / object from a JSON body.
+ */
+function parseBodyArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+/**
+ * Auto-generate an invoice number in the format INV-001, INV-002 … for this
+ * tenant.  We count existing invoices (including cancelled/draft) so numbers
+ * never repeat even after deletion.
+ */
+async function nextInvoiceNumber(tenantId) {
+  const count = await Invoice.countDocuments({ tenantId });
+  const seq = String(count + 1).padStart(3, "0");
+  return `INV-${seq}`;
+}
+
+/**
+ * Derive GST type from the first two digits of the buyer and seller GSTINs.
+ * If either is missing we fall back to "intra" (safest default).
+ */
+function deriveGstType(tenantGstin, clientGstin) {
+  if (!tenantGstin || !clientGstin) return "intra";
+  const sellerState = tenantGstin.substring(0, 2);
+  const buyerState = clientGstin.substring(0, 2);
+  return sellerState === buyerState ? "intra" : "inter";
+}
+
+/**
+ * Core financial calculation.  All inputs come from validated/normalised
+ * values; returns a plain object of computed fields ready to spread into the
+ * Invoice doc.
+ */
+function calculateInvoiceTotals({
+  items,
+  discountType = "none",
+  discountValue = 0,
+  additionalCharges = [],
+  tdsRate = 0,
+  gstType = "intra",
+}) {
+  // 1. Per-item amounts (always recalculated from qty * rate)
+  const normalizedItems = items.map((item) => ({
+    ...item,
+    quantity: Number(item.quantity),
+    rate: Number(item.rate),
+    amount: Number(item.quantity) * Number(item.rate),
+    gstRate: Number(item.gstRate) || 18,
+  }));
+
+  // 2. Subtotal
+  const subtotal = normalizedItems.reduce((sum, i) => sum + i.amount, 0);
+
+  // 3. Discount
+  let discountAmount = 0;
+  if (discountType === "pct") {
+    discountAmount = (subtotal * Number(discountValue)) / 100;
+  } else if (discountType === "fixed") {
+    discountAmount = Number(discountValue);
+  }
+  discountAmount = Math.min(discountAmount, subtotal); // can't exceed subtotal
+
+  const taxableAmount = subtotal - discountAmount;
+
+  // 4. Tax lines — group items by gstRate
+  const rateGroups = {};
+  for (const item of normalizedItems) {
+    const rate = item.gstRate;
+    if (!rateGroups[rate]) rateGroups[rate] = 0;
+    // proportionally allocate discount to each item group
+    const itemTaxable = item.amount - (subtotal > 0 ? (item.amount / subtotal) * discountAmount : 0);
+    rateGroups[rate] += itemTaxable;
+  }
+
+  const taxLines = [];
+  let totalTax = 0;
+
+  for (const [rateStr, groupTaxable] of Object.entries(rateGroups)) {
+    const gstRate = Number(rateStr);
+    const line = { gstRate, taxableAmount: groupTaxable };
+
+    if (gstType === "intra") {
+      const halfRate = gstRate / 2;
+      const halfAmount = (groupTaxable * halfRate) / 100;
+      line.cgstRate = halfRate;
+      line.cgstAmount = halfAmount;
+      line.sgstRate = halfRate;
+      line.sgstAmount = halfAmount;
+      line.igstRate = 0;
+      line.igstAmount = 0;
+      totalTax += halfAmount * 2;
+    } else {
+      const igstAmount = (groupTaxable * gstRate) / 100;
+      line.cgstRate = 0;
+      line.cgstAmount = 0;
+      line.sgstRate = 0;
+      line.sgstAmount = 0;
+      line.igstRate = gstRate;
+      line.igstAmount = igstAmount;
+      totalTax += igstAmount;
+    }
+
+    taxLines.push(line);
+  }
+
+  // 5. Additional charges
+  const normalizedCharges = additionalCharges.map((c) => ({
+    label: c.label,
+    amount: Number(c.amount),
+  }));
+  const additionalChargesTotal = normalizedCharges.reduce((sum, c) => sum + c.amount, 0);
+
+  // 6. TDS
+  const tdsAmount = ((taxableAmount + totalTax) * Number(tdsRate)) / 100;
+
+  // 7. Round-off (bring total to nearest rupee)
+  const rawTotal = taxableAmount + totalTax + additionalChargesTotal - tdsAmount;
+  const roundOff = Math.round(rawTotal) - rawTotal;
+  const totalAmount = rawTotal + roundOff;
+
+  return {
+    items: normalizedItems,
+    subtotal,
+    discountAmount,
+    taxableAmount,
+    taxLines,
+    totalTax,
+    additionalCharges: normalizedCharges,
+    additionalChargesTotal,
+    tdsAmount,
+    roundOff,
+    totalAmount,
+  };
+}
+
+/**
+ * Build the company snapshot from a Tenant document.
+ */
+function buildCompanySnapshot(tenant) {
+  const s = tenant.invoiceSettings || {};
+  return {
+    name: tenant.companyName,
+    address: tenant.address,
+    gstin: tenant.gstNumber,
+    stateCode: s.stateCode,
+    phone: tenant.phone,
+    email: s.email,
+    logo: tenant.logo,
+    bankName: s.bankName,
+    accountNumber: s.accountNumber,
+    ifsc: s.ifsc,
+    accountHolder: s.accountHolder,
+    upiId: s.upiId,
+    signature: s.signature,
+    pan: s.pan,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Controllers
+// ---------------------------------------------------------------------------
 
 // GET /api/invoices
 const getInvoices = async (req, res, next) => {
@@ -10,7 +186,7 @@ const getInvoices = async (req, res, next) => {
     const filter = { tenantId: req.tenantId };
     if (project) filter.project = project;
     if (status) filter.status = status;
-    if (clientName) filter.clientName = { $regex: clientName, $options: "i" };
+    if (clientName) filter["client.name"] = { $regex: clientName, $options: "i" };
 
     const invoices = await Invoice.find(filter)
       .populate("project", "name location")
@@ -30,7 +206,33 @@ const getInvoice = async (req, res, next) => {
       .populate("project", "name location clientName")
       .populate("createdBy", "name");
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found." });
-    res.json({ success: true, data: invoice });
+
+    // Merge live tenant invoiceSettings into the company snapshot so the
+    // frontend always gets up-to-date bank/signature details.
+    const tenant = await Tenant.findOne({ tenantId: req.tenantId });
+    const liveCompany = tenant ? buildCompanySnapshot(tenant) : {};
+    const mergedCompany = { ...liveCompany, ...invoice.company?.toObject?.() };
+
+    res.json({ success: true, data: { ...invoice.toObject(), company: mergedCompany } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/invoices/:id/print
+const getInvoiceForPrint = async (req, res, next) => {
+  try {
+    const invoice = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenantId })
+      .populate("project", "name location clientName")
+      .populate("createdBy", "name");
+    if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found." });
+
+    const tenant = await Tenant.findOne({ tenantId: req.tenantId });
+    const liveCompany = tenant ? buildCompanySnapshot(tenant) : {};
+    // For print: live tenant data takes precedence (most current details)
+    const mergedCompany = { ...invoice.company?.toObject?.(), ...liveCompany };
+
+    res.json({ success: true, data: { ...invoice.toObject(), company: mergedCompany } });
   } catch (err) {
     next(err);
   }
@@ -40,56 +242,64 @@ const getInvoice = async (req, res, next) => {
 const createInvoice = async (req, res, next) => {
   try {
     const {
-      project, clientName, clientAddress, clientGST,
-      milestone, items, gstRate = 18,
-      invoiceDate, dueDate, notes,
+      // Client
+      client,
+      // Invoice meta
+      invoiceNumber: providedInvoiceNumber,
+      invoiceDate,
+      dueDate,
+      // Project
+      project,
+      projectName: providedProjectName,
+      siteName,
+      siteLocation,
+      workType,
+      // Items
+      items,
+      // Discount
+      discountType,
+      discountValue,
+      // GST override (optional — auto-detected if not provided)
+      gstType: gstTypeOverride,
+      // Additional charges
+      additionalCharges,
+      // TDS
+      tdsRate,
+      // Options
+      reverseCharge,
+      // Recurring
+      recurring,
+      milestone,
+      // Content
+      terms,
+      notes,
+      paymentInstructions,
+      // Attachments
+      attachments,
     } = req.body;
 
-    const parseBodyArray = (value) => {
-      if (Array.isArray(value)) return value;
-      if (typeof value === "string") {
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
-      }
-      return value;
-    };
+    // --- Validate required fields ---
+    if (!client || !client.name) {
+      return res.status(400).json({ success: false, message: "client.name is required." });
+    }
 
     const invoiceItems = parseBodyArray(items);
-    const parsedInvoiceDate = new Date(invoiceDate);
-    const parsedDueDate = new Date(dueDate);
-
-    if (!project || !clientName || !invoiceItems || invoiceItems.length === 0 || !invoiceDate || !dueDate) {
-      return res.status(400).json({
-        success: false,
-        message: "Project, client, invoice items, invoice date, and due date are required.",
-      });
+    if (!invoiceItems || !Array.isArray(invoiceItems) || invoiceItems.length === 0) {
+      return res.status(400).json({ success: false, message: "At least one invoice item is required." });
     }
 
-    if (!Array.isArray(invoiceItems)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invoice items must be sent as an array.",
-      });
-    }
-
-    if (Number.isNaN(parsedInvoiceDate.getTime()) || Number.isNaN(parsedDueDate.getTime())) {
-      return res.status(400).json({
-        success: false,
-        message: "Invoice date and due date must be valid dates.",
-      });
-    }
-
+    // Validate items
     const itemErrors = invoiceItems
-      .map((item, index) => {
-        if (!item || typeof item !== "object") return `Item ${index + 1} is invalid.`;
-        if (!item.description || !item.description.toString().trim()) return `Item ${index + 1}: description is required.`;
-        const quantity = Number(item.quantity);
+      .map((item, i) => {
+        if (!item || typeof item !== "object") return `Item ${i + 1} is invalid.`;
+        if (!item.description || !String(item.description).trim()) return `Item ${i + 1}: description is required.`;
+        const qty = Number(item.quantity);
         const rate = Number(item.rate);
-        if (Number.isNaN(quantity) || quantity <= 0) return `Item ${index + 1}: quantity must be a number greater than 0.`;
-        if (Number.isNaN(rate) || rate < 0) return `Item ${index + 1}: rate must be a number greater than or equal to 0.`;
+        if (Number.isNaN(qty) || qty < 0) return `Item ${i + 1}: quantity must be >= 0.`;
+        if (Number.isNaN(rate) || rate < 0) return `Item ${i + 1}: rate must be >= 0.`;
+        if (item.gstRate !== undefined && ![0, 5, 12, 18, 28].includes(Number(item.gstRate))) {
+          return `Item ${i + 1}: gstRate must be one of 0, 5, 12, 18, 28.`;
+        }
         return null;
       })
       .filter(Boolean);
@@ -98,38 +308,93 @@ const createInvoice = async (req, res, next) => {
       return res.status(400).json({ success: false, message: itemErrors.join(" ") });
     }
 
-    const normalizedItems = invoiceItems.map((item) => ({
-      description: item.description,
-      quantity: Number(item.quantity),
-      rate: Number(item.rate),
-      amount: item.amount != null ? Number(item.amount) : Number(item.quantity) * Number(item.rate),
-    }));
+    // --- Fetch tenant for company snapshot + GST state code ---
+    const tenant = await Tenant.findOne({ tenantId: req.tenantId });
+    if (!tenant) return res.status(404).json({ success: false, message: "Tenant not found." });
 
-    const subtotal = normalizedItems.reduce((sum, item) => sum + item.amount, 0);
-    const gstAmount = Math.round(subtotal * (Number(gstRate) / 100));
-    const totalAmount = subtotal + gstAmount;
+    // --- Detect GST type ---
+    const gstType =
+      gstTypeOverride ||
+      deriveGstType(tenant.gstNumber, client.gstin);
 
-    const invoice = await Invoice.create({
-      tenantId: req.tenantId,
-      invoiceNumber: generateInvoiceNumber(req.tenantId, await Invoice.countDocuments({ tenantId: req.tenantId })),
-      project,
-      clientName,
-      clientAddress,
-      clientGST,
-      milestone,
-      items: normalizedItems,
-      subtotal,
-      gstRate: Number(gstRate),
-      gstAmount,
-      totalAmount,
-      paidAmount: 0,
-      balanceAmount: totalAmount,
-      invoiceDate: parsedInvoiceDate,
-      dueDate: parsedDueDate,
-      status: "draft",
-      notes,
-      createdBy: req.user._id,
+    // --- Snapshot project name ---
+    let projectName = providedProjectName;
+    if (project && !projectName) {
+      const Project = mongoose.model("Project");
+      const proj = await Project.findById(project).select("name").lean();
+      if (proj) projectName = proj.name;
+    }
+
+    // --- Auto-generate invoice number if not provided ---
+    const invoiceNumber = providedInvoiceNumber || (await nextInvoiceNumber(req.tenantId));
+
+    // --- Calculate all financials ---
+    const parsedAdditionalCharges = parseBodyArray(additionalCharges) || [];
+    const calc = calculateInvoiceTotals({
+      items: invoiceItems.map((item) => ({
+        description: String(item.description).trim(),
+        hsnCode: item.hsnCode,
+        unit: item.unit || "nos",
+        quantity: Number(item.quantity),
+        rate: Number(item.rate),
+        gstRate: Number(item.gstRate) || 18,
+      })),
+      discountType: discountType || "none",
+      discountValue: Number(discountValue) || 0,
+      additionalCharges: parsedAdditionalCharges,
+      tdsRate: Number(tdsRate) || 0,
+      gstType,
     });
+
+    // --- Build company snapshot ---
+    const company = buildCompanySnapshot(tenant);
+
+    const invoiceData = {
+      tenantId: req.tenantId,
+      company,
+      client: {
+        name: client.name,
+        address: client.address,
+        gstin: client.gstin,
+        stateCode: client.stateCode || (client.gstin ? client.gstin.substring(0, 2) : undefined),
+        phone: client.phone,
+        email: client.email,
+      },
+      invoiceNumber,
+      invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
+      dueDate: dueDate ? new Date(dueDate) : undefined,
+      project: project || undefined,
+      projectName,
+      siteName,
+      siteLocation,
+      workType: workType || "other",
+      // Calculated
+      ...calc,
+      discountType: discountType || "none",
+      discountValue: Number(discountValue) || 0,
+      gstType,
+      tdsRate: Number(tdsRate) || 0,
+      reverseCharge: Boolean(reverseCharge),
+      paidAmount: 0,
+      balanceAmount: calc.totalAmount,
+      status: "draft",
+      // Recurring
+      recurring: recurring || { type: "one-time" },
+      milestone: milestone || (recurring && recurring.milestone) || undefined,
+      // Backward-compat gstRate — use first item's rate or 18
+      gstRate: invoiceItems[0] ? (Number(invoiceItems[0].gstRate) || 18) : 18,
+      // Content
+      terms: terms || (tenant.invoiceSettings && tenant.invoiceSettings.defaultTerms) || undefined,
+      notes,
+      paymentInstructions:
+        paymentInstructions ||
+        (tenant.invoiceSettings && tenant.invoiceSettings.defaultPaymentInstructions) ||
+        undefined,
+      attachments: parseBodyArray(attachments) || [],
+      createdBy: req.user._id,
+    };
+
+    const invoice = await Invoice.create(invoiceData);
 
     res.status(201).json({ success: true, message: "Invoice created.", data: invoice });
   } catch (err) {
@@ -143,59 +408,119 @@ const updateInvoice = async (req, res, next) => {
     const invoice = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenantId });
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found." });
 
-    // ✅ SAFEGUARD: Prevent retroactive changes to payment history
-    // Once an invoice has any payment record, lock down financial fields
     const hasPaymentHistory = invoice.paidAmount > 0 || invoice.payments.length > 0;
 
-    // Define which fields can be updated after payment
-    const allowedFieldsAfterPayment = [
-      "clientName", "clientAddress", "clientGST",
-      "notes", "milestone",
-      "status", // status can change (e.g., sent, overdue) but not amounts
-    ];
-
-    // Fields that should NEVER be modified (payment history)
-    const lockedFields = ["paidAmount", "balanceAmount", "totalAmount", "items", "payments", "gstAmount", "subtotal", "gstRate"];
-
-    // Check if update contains locked fields
-    const updateKeys = Object.keys(req.body);
-    const hasLockedFields = updateKeys.some(key => lockedFields.includes(key));
-
-    if (hasPaymentHistory && hasLockedFields) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot modify payment/amount fields for invoices with payment history. Locked fields: ${lockedFields.filter(f => updateKeys.includes(f)).join(", ")}`,
-      });
-    }
-
-    // Filter updates to allowed fields if payment exists
-    let updateData = req.body;
     if (hasPaymentHistory) {
-      updateData = {};
-      allowedFieldsAfterPayment.forEach(field => {
-        if (field in req.body) {
-          updateData[field] = req.body[field];
-        }
-      });
-      
-      // Warn if locked fields were provided
-      const skippedFields = updateKeys.filter(k => !allowedFieldsAfterPayment.includes(k) && !lockedFields.includes(k));
-      if (skippedFields.length > 0) {
-        console.warn(`[updateInvoice] Skipped unknown fields for paid invoice: ${skippedFields.join(", ")}`);
+      // After payment: only allow non-financial metadata updates
+      const allowedAfterPayment = [
+        "client", "notes", "terms", "paymentInstructions",
+        "status", "milestone", "dueDate", "attachments",
+        "siteName", "siteLocation", "workType",
+      ];
+
+      const updateData = {};
+      for (const field of allowedAfterPayment) {
+        if (field in req.body) updateData[field] = req.body[field];
       }
+
+      const financialFields = ["items", "subtotal", "totalAmount", "taxLines", "discountType",
+        "discountValue", "discountAmount", "taxableAmount", "totalTax", "tdsRate", "tdsAmount",
+        "additionalCharges", "additionalChargesTotal", "roundOff", "paidAmount", "balanceAmount",
+        "gstType", "gstRate"];
+      const attempted = Object.keys(req.body).filter((k) => financialFields.includes(k));
+      if (attempted.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot modify financial fields after payment has been recorded: ${attempted.join(", ")}`,
+        });
+      }
+
+      const updated = await Invoice.findOneAndUpdate(
+        { _id: req.params.id, tenantId: req.tenantId },
+        { $set: updateData },
+        { new: true }
+      ).populate("project", "name location").populate("createdBy", "name");
+
+      return res.json({
+        success: true,
+        message: "Invoice updated. Payment history protected.",
+        data: updated,
+      });
     }
+
+    // No payment history — allow full recalculation
+    const {
+      client, invoiceDate, dueDate, project, projectName, siteName, siteLocation, workType,
+      items, discountType, discountValue, additionalCharges, tdsRate, gstType: gstTypeOverride,
+      reverseCharge, recurring, milestone, terms, notes, paymentInstructions, attachments, status,
+    } = req.body;
+
+    let updateData = {};
+
+    // Recalculate if financial fields are being changed
+    const financialChange = items || discountType !== undefined || discountValue !== undefined ||
+      additionalCharges || tdsRate !== undefined || gstTypeOverride;
+
+    if (financialChange) {
+      const tenant = await Tenant.findOne({ tenantId: req.tenantId });
+      const effectiveItems = parseBodyArray(items) || invoice.items;
+      const effectiveGstType =
+        gstTypeOverride ||
+        deriveGstType(
+          tenant ? tenant.gstNumber : null,
+          (client && client.gstin) || invoice.client.gstin
+        );
+
+      const calc = calculateInvoiceTotals({
+        items: effectiveItems.map((item) => ({
+          description: item.description,
+          hsnCode: item.hsnCode,
+          unit: item.unit || "nos",
+          quantity: Number(item.quantity),
+          rate: Number(item.rate),
+          gstRate: Number(item.gstRate) || 18,
+        })),
+        discountType: discountType !== undefined ? discountType : invoice.discountType,
+        discountValue: discountValue !== undefined ? Number(discountValue) : invoice.discountValue,
+        additionalCharges: parseBodyArray(additionalCharges) || invoice.additionalCharges,
+        tdsRate: tdsRate !== undefined ? Number(tdsRate) : invoice.tdsRate,
+        gstType: effectiveGstType,
+      });
+
+      Object.assign(updateData, calc, {
+        gstType: effectiveGstType,
+        discountType: discountType !== undefined ? discountType : invoice.discountType,
+        discountValue: discountValue !== undefined ? Number(discountValue) : invoice.discountValue,
+        tdsRate: tdsRate !== undefined ? Number(tdsRate) : invoice.tdsRate,
+        balanceAmount: calc.totalAmount,
+      });
+    }
+
+    // Non-financial fields
+    if (client) updateData.client = client;
+    if (invoiceDate) updateData.invoiceDate = new Date(invoiceDate);
+    if (dueDate) updateData.dueDate = new Date(dueDate);
+    if (project !== undefined) updateData.project = project;
+    if (projectName !== undefined) updateData.projectName = projectName;
+    if (siteName !== undefined) updateData.siteName = siteName;
+    if (siteLocation !== undefined) updateData.siteLocation = siteLocation;
+    if (workType) updateData.workType = workType;
+    if (reverseCharge !== undefined) updateData.reverseCharge = Boolean(reverseCharge);
+    if (recurring) updateData.recurring = recurring;
+    if (milestone !== undefined) updateData.milestone = milestone;
+    if (terms !== undefined) updateData.terms = terms;
+    if (notes !== undefined) updateData.notes = notes;
+    if (paymentInstructions !== undefined) updateData.paymentInstructions = paymentInstructions;
+    if (attachments) updateData.attachments = parseBodyArray(attachments);
+    if (status) updateData.status = status;
 
     const updated = await Invoice.findOneAndUpdate(
       { _id: req.params.id, tenantId: req.tenantId },
-      updateData,
+      { $set: updateData },
       { new: true }
     ).populate("project", "name location").populate("createdBy", "name");
 
-    res.json({
-      success: true,
-      data: updated,
-      ...(hasPaymentHistory && { message: "Invoice updated. Payment history protected." }),
-    });
+    res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
   }
@@ -224,7 +549,7 @@ const recordPayment = async (req, res, next) => {
       return res.status(404).json({ success: false, message: "Invoice not found." });
     }
 
-    // ✅ SAFEGUARD: Prevent overpayment
+    // Prevent overpayment
     const newPaidAmount = invoice.paidAmount + paymentAmount;
     if (newPaidAmount > invoice.totalAmount) {
       await session.abortTransaction();
@@ -252,13 +577,13 @@ const recordPayment = async (req, res, next) => {
         {
           tenantId: req.tenantId,
           project: invoice.project,
-          clientName: invoice.clientName,
+          clientName: invoice.client.name,
           invoice: invoice._id,
           amount: paymentAmount,
           date: paymentDate,
           paymentMode: mode || "bank",
           reference,
-          milestone: invoice.milestone,
+          milestone: invoice.milestone || (invoice.recurring && invoice.recurring.milestone),
           notes,
           recordedBy: req.user._id,
         },
@@ -307,4 +632,12 @@ const getInvoiceSummary = async (req, res, next) => {
   }
 };
 
-module.exports = { getInvoices, getInvoice, createInvoice, updateInvoice, recordPayment, getInvoiceSummary };
+module.exports = {
+  getInvoices,
+  getInvoice,
+  getInvoiceForPrint,
+  createInvoice,
+  updateInvoice,
+  recordPayment,
+  getInvoiceSummary,
+};

@@ -205,4 +205,38 @@ const changePassword = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { signup, login, getMe, forgotPassword, resetPassword, changePassword, getCompanyBySlug };
+// GET /api/auth/invoice-settings
+const getInvoiceSettings = async (req, res, next) => {
+  try {
+    const tenant = await Tenant.findOne({ tenantId: req.tenantId });
+    if (!tenant) return res.status(404).json({ success: false, message: "Tenant not found." });
+
+    const settings = tenant.invoiceSettings ? tenant.invoiceSettings.toObject() : {};
+    res.json({
+      success: true,
+      data: {
+        ...settings,
+        companyName: tenant.companyName,
+        address: tenant.address,
+        phone: tenant.phone,
+        gstin: tenant.gstNumber,
+        logo: tenant.logo,
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+// PUT /api/auth/invoice-settings
+const updateInvoiceSettings = async (req, res, next) => {
+  try {
+    const tenant = await Tenant.findOneAndUpdate(
+      { tenantId: req.tenantId },
+      { $set: { invoiceSettings: req.body } },
+      { new: true, runValidators: true }
+    );
+    if (!tenant) return res.status(404).json({ success: false, message: "Tenant not found." });
+    res.json({ success: true, data: tenant.invoiceSettings });
+  } catch (err) { next(err); }
+};
+
+module.exports = { signup, login, getMe, forgotPassword, resetPassword, changePassword, getCompanyBySlug, getInvoiceSettings, updateInvoiceSettings };

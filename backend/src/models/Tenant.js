@@ -32,6 +32,21 @@ const tenantSchema = new mongoose.Schema(
     },
     logo: { type: String },
     isActive: { type: Boolean, default: true },
+
+    // Invoice / company profile for GST invoices
+    invoiceSettings: {
+      email: { type: String },
+      pan: { type: String },
+      stateCode: { type: String }, // 2-digit GST state code, e.g. "27" for Maharashtra
+      bankName: { type: String },
+      accountNumber: { type: String },
+      ifsc: { type: String },
+      accountHolder: { type: String },
+      upiId: { type: String },
+      signature: { type: String }, // URL
+      defaultTerms: { type: String },
+      defaultPaymentInstructions: { type: String },
+    },
   },
   { timestamps: true }
 );
