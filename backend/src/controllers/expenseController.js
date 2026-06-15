@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Expense = require("../models/Expense");
 const Project = require("../models/Project");
 const Vendor  = require("../models/Vendor");
@@ -21,6 +22,11 @@ const getExpenses = async (req, res, next) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
+
+    // Build aggregate match separately — aggregate doesn't auto-coerce strings to ObjectId
+    const aggFilter = { ...filter };
+    if (aggFilter.project) aggFilter.project = new mongoose.Types.ObjectId(aggFilter.project);
+
     const [expenses, total, amountAgg] = await Promise.all([
       Expense.find(filter)
         .populate("project", "name location")
@@ -30,7 +36,7 @@ const getExpenses = async (req, res, next) => {
         .skip(skip)
         .limit(Number(limit)),
       Expense.countDocuments(filter),
-      Expense.aggregate([{ $match: filter }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
+      Expense.aggregate([{ $match: aggFilter }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
     ]);
 
     res.json({ success: true, count: total, totalAmount: amountAgg[0]?.total ?? 0, data: expenses });
