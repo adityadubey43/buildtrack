@@ -7,6 +7,8 @@ const Project = require("../models/Project");
 const Worker = require("../models/Worker");
 const Attendance = require("../models/Attendance");
 const { signPlatformToken } = require("../middleware/platformAuth");
+const { sendEmail } = require("../utils/mailer");
+const templates    = require("../utils/emailTemplates");
 
 // ── Razorpay helper (lazy) ────────────────────────────────────────────────────
 function getRzp() {
@@ -359,4 +361,36 @@ const setPricing = async (req, res, next) => {
   }
 };
 
-module.exports = { login, getMe, getStats, getCompanies, updateCompany, getPricing, setPricing };
+// POST /api/platform/send-trial-reminders
+// Call this from a daily cron (e.g. Render cron job or external scheduler).
+// Sends emails to tenants whose trial ends in ≤ 3 days and haven't been notified today.
+const sendTrialReminders = async (req, res, next) => {
+  try {
+    const now   = new Date();
+    const in3d  = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+
+    const trials = await Tenant.find({
+      planStatus: "trial",
+      isActive: true,
+      trialEndsAt: { $gte: now, $lte: in3d },
+    });
+
+    let sent = 0;
+    for (const tenant of trials) {
+      const admin = await User.findOne({ tenantId: tenant.tenantId, role: "admin" });
+      if (!admin) continue;
+      const tpl = templates.trialEndingSoon({
+        adminName:   admin.name,
+        companyName: tenant.companyName,
+        trialEndsAt: tenant.trialEndsAt,
+        upgradeUrl:  `${process.env.FRONTEND_URL || ""}/${tenant.slug}/dashboard`,
+      });
+      sendEmail({ to: admin.email, ...tpl });
+      sent++;
+    }
+
+    res.json({ success: true, message: `Trial reminder emails queued for ${sent} tenant(s).` });
+  } catch (err) { next(err); }
+};
+
+module.exports = { login, getMe, getStats, getCompanies, updateCompany, getPricing, setPricing, sendTrialReminders };

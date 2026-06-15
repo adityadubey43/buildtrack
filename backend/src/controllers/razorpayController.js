@@ -4,6 +4,8 @@ const Tenant   = require("../models/Tenant");
 const User     = require("../models/User");
 const PlatformConfig = require("../models/PlatformConfig");
 const { generateToken, generateTenantId, generateUniqueSlug } = require("../utils/generateToken");
+const { sendEmail } = require("../utils/mailer");
+const templates    = require("../utils/emailTemplates");
 
 // ── Lazy Razorpay instance ────────────────────────────────────────────────────
 let _rzp = null;
@@ -282,6 +284,19 @@ const verifyAndSignup = async (req, res, next) => {
 
     const user = await User.create({ tenantId, name: adminName, email: email.toLowerCase(), password, phone, role: "admin" });
 
+    // Payment confirmation email
+    const tpl = templates.paymentConfirmed({
+      adminName,
+      companyName,
+      plan,
+      billing,
+      amount,
+      startDate: now,
+      nextBillingDate: endsAt,
+      paymentId: razorpay_payment_id || refId,
+    });
+    sendEmail({ to: email.toLowerCase(), ...tpl });
+
     res.status(201).json({
       success: true,
       message: "Account created and subscription activated!",
@@ -354,6 +369,20 @@ const activateSubscription = async (req, res, next) => {
     await tenant.save();
 
     const user = await User.findById(req.user._id);
+
+    // Payment confirmation email
+    const tpl = templates.paymentConfirmed({
+      adminName: user.name,
+      companyName: tenant.companyName,
+      plan: tenant.plan,
+      billing,
+      amount,
+      startDate: now,
+      nextBillingDate: billing === "yearly" ? tenant.subscriptionEndsAt : null,
+      paymentId: razorpay_payment_id || refId,
+    });
+    sendEmail({ to: user.email, ...tpl });
+
     res.json({ success: true, message: "Subscription activated!", user: userPayload(user, tenant) });
   } catch (err) { next(err); }
 };
@@ -382,9 +411,42 @@ const webhook = async (req, res) => {
     const tenant = await Tenant.findOne({ razorpaySubscriptionId: subscriptionId });
     if (!tenant) return res.json({ received: true });
 
-    if (event === "subscription.activated" || event === "subscription.charged") tenant.planStatus = "active";
-    else if (event === "subscription.halted" || event === "subscription.pending") tenant.planStatus = "expired";
-    else if (event === "subscription.cancelled") { tenant.planStatus = "cancelled"; tenant.isActive = false; }
+    const adminUser = await User.findOne({ tenantId: tenant.tenantId, role: "admin" });
+
+    if (event === "subscription.activated") {
+      tenant.planStatus = "active";
+    } else if (event === "subscription.charged") {
+      tenant.planStatus = "active";
+      // Renewal confirmation email
+      if (adminUser) {
+        const chargeAmt = payload?.payment?.entity?.amount;
+        const tpl = templates.subscriptionRenewed({
+          companyName: tenant.companyName,
+          plan: tenant.plan,
+          billing: tenant.subscriptionPrice?.billing || "monthly",
+          amount: chargeAmt ? chargeAmt / 100 : tenant.subscriptionPrice?.amount,
+          periodEnd: tenant.subscriptionEndsAt,
+        });
+        sendEmail({ to: adminUser.email, ...tpl });
+      }
+    } else if (event === "subscription.halted" || event === "subscription.pending") {
+      tenant.planStatus = "expired";
+      if (adminUser) {
+        const tpl = templates.planExpired({
+          adminName: adminUser.name,
+          companyName: tenant.companyName,
+          upgradeUrl: `${process.env.FRONTEND_URL || ""}/${tenant.slug}/dashboard`,
+        });
+        sendEmail({ to: adminUser.email, ...tpl });
+      }
+    } else if (event === "subscription.cancelled") {
+      tenant.planStatus = "cancelled";
+      tenant.isActive   = false;
+      if (adminUser) {
+        const tpl = templates.subscriptionCancelled({ adminName: adminUser.name, companyName: tenant.companyName });
+        sendEmail({ to: adminUser.email, ...tpl });
+      }
+    }
 
     await tenant.save();
     res.json({ received: true });
