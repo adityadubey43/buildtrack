@@ -62,6 +62,7 @@ app.use("/api/equipment", require("./routes/equipment"));
 app.use("/api/upload", require("./routes/upload"));
 app.use("/api/expenses", require("./routes/expenses"));
 app.use("/api/payments", require("./routes/payments"));
+app.use("/api/vendors",  require("./routes/vendors"));
 app.use("/api/platform", require("./routes/platform")); // BuildTrack super-admin console
 
 // Razorpay routes (webhook uses raw body inline, others use JSON)

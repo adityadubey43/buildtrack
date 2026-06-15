@@ -1,5 +1,6 @@
 const Expense = require("../models/Expense");
 const Project = require("../models/Project");
+const Vendor  = require("../models/Vendor");
 
 // GET /api/expenses
 const getExpenses = async (req, res, next) => {
@@ -24,6 +25,7 @@ const getExpenses = async (req, res, next) => {
       Expense.find(filter)
         .populate("project", "name location")
         .populate("recordedBy", "name")
+        .populate("vendorId", "name phone")
         .sort({ date: -1 })
         .skip(skip)
         .limit(Number(limit)),
@@ -72,7 +74,7 @@ const getExpenseSummary = async (req, res, next) => {
 // POST /api/expenses
 const createExpense = async (req, res, next) => {
   try {
-    const { project, type, description, amount, date, vendor, invoiceNumber, paymentMode, notes, attachments } = req.body;
+    const { project, type, description, amount, paidAmount, date, vendor, vendorId, invoiceNumber, paymentMode, notes, attachments } = req.body;
 
     if (!project || !type || !description || !amount) {
       return res.status(400).json({ success: false, message: "Project, type, description, and amount are required." });
@@ -81,22 +83,32 @@ const createExpense = async (req, res, next) => {
     const proj = await Project.findOne({ _id: project, tenantId: req.tenantId });
     if (!proj) return res.status(404).json({ success: false, message: "Project not found." });
 
+    // Resolve vendor name: if vendorId supplied, fetch name from DB
+    let resolvedVendorName = vendor || "";
+    if (vendorId) {
+      const v = await Vendor.findOne({ _id: vendorId, tenantId: req.tenantId });
+      if (v) resolvedVendorName = v.name;
+    }
+
     const expense = await Expense.create({
       tenantId: req.tenantId,
       project, type, description,
       amount: Number(amount),
+      paidAmount: Number(paidAmount) || 0,
       date: date ? new Date(date) : new Date(),
-      vendor, invoiceNumber, paymentMode, notes,
+      vendor: resolvedVendorName,
+      vendorId: vendorId || null,
+      invoiceNumber, paymentMode, notes,
       attachments: attachments || [],
       recordedBy: req.user._id,
     });
 
-    // Update project amountSpent
     await Project.findByIdAndUpdate(project, { $inc: { amountSpent: Number(amount) } });
 
     await expense.populate([
       { path: "project", select: "name location" },
       { path: "recordedBy", select: "name" },
+      { path: "vendorId", select: "name phone" },
     ]);
 
     res.status(201).json({ success: true, message: "Expense recorded.", data: expense });
@@ -113,9 +125,17 @@ const updateExpense = async (req, res, next) => {
 
     const diff = (req.body.amount ? Number(req.body.amount) : old.amount) - old.amount;
 
-    const expense = await Expense.findByIdAndUpdate(req.params.id, req.body, { new: true })
+    // Keep vendor string in sync when vendorId changes
+    const updateBody = { ...req.body };
+    if (updateBody.vendorId) {
+      const v = await Vendor.findOne({ _id: updateBody.vendorId, tenantId: req.tenantId });
+      if (v) updateBody.vendor = v.name;
+    }
+
+    const expense = await Expense.findByIdAndUpdate(req.params.id, updateBody, { new: true })
       .populate("project", "name location")
-      .populate("recordedBy", "name");
+      .populate("recordedBy", "name")
+      .populate("vendorId", "name phone");
 
     if (diff !== 0) {
       await Project.findByIdAndUpdate(old.project, { $inc: { amountSpent: diff } });

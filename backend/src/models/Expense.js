@@ -10,9 +10,11 @@ const expenseSchema = new mongoose.Schema(
       required: true,
     },
     description: { type: String, required: true, trim: true },
-    amount: { type: Number, required: true, min: 0 },
+    amount:    { type: Number, required: true, min: 0 },
+    paidAmount:{ type: Number, default: 0, min: 0 },
     date: { type: Date, required: true, default: Date.now },
-    vendor: { type: String },
+    vendor:   { type: String },
+    vendorId: { type: mongoose.Schema.Types.ObjectId, ref: "Vendor", default: null },
     invoiceNumber: { type: String },
     paymentMode: {
       type: String,
