@@ -19,7 +19,7 @@ const getPayments = async (req, res, next) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [payments, total] = await Promise.all([
+    const [payments, total, amountAgg] = await Promise.all([
       PaymentReceived.find(filter)
         .populate("project", "name location")
         .populate("recordedBy", "name")
@@ -27,9 +27,10 @@ const getPayments = async (req, res, next) => {
         .skip(skip)
         .limit(Number(limit)),
       PaymentReceived.countDocuments(filter),
+      PaymentReceived.aggregate([{ $match: filter }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
     ]);
 
-    res.json({ success: true, count: total, data: payments });
+    res.json({ success: true, count: total, totalAmount: amountAgg[0]?.total ?? 0, data: payments });
   } catch (err) {
     next(err);
   }

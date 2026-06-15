@@ -21,7 +21,7 @@ const getExpenses = async (req, res, next) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [expenses, total] = await Promise.all([
+    const [expenses, total, amountAgg] = await Promise.all([
       Expense.find(filter)
         .populate("project", "name location")
         .populate("recordedBy", "name")
@@ -30,9 +30,10 @@ const getExpenses = async (req, res, next) => {
         .skip(skip)
         .limit(Number(limit)),
       Expense.countDocuments(filter),
+      Expense.aggregate([{ $match: filter }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
     ]);
 
-    res.json({ success: true, count: total, data: expenses });
+    res.json({ success: true, count: total, totalAmount: amountAgg[0]?.total ?? 0, data: expenses });
   } catch (err) {
     next(err);
   }
