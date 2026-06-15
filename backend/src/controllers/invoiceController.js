@@ -533,7 +533,7 @@ const recordPayment = async (req, res, next) => {
   session.startTransaction();
 
   try {
-    const { amount, date, mode, reference, notes } = req.body;
+    const { amount, date, mode, reference, notes, skipPaymentEntry, linkPaymentId } = req.body;
     const paymentAmount = Number(amount);
     const paymentDate = new Date(date);
 
@@ -573,32 +573,46 @@ const recordPayment = async (req, res, next) => {
 
     await invoice.save({ session });
 
-    await PaymentReceived.create(
-      [
-        {
-          tenantId: req.tenantId,
-          project: invoice.project,
-          clientName: invoice.client.name,
-          invoice: invoice._id,
-          amount: paymentAmount,
-          date: paymentDate,
-          paymentMode: mode || "bank",
-          reference,
-          milestone: invoice.milestone || (invoice.recurring && invoice.recurring.milestone),
-          notes,
-          recordedBy: req.user._id,
-        },
-      ],
-      { session }
-    );
+    if (skipPaymentEntry && linkPaymentId) {
+      // Link the existing PaymentReceived to this invoice instead of creating a duplicate
+      await PaymentReceived.findOneAndUpdate(
+        { _id: linkPaymentId, tenantId: req.tenantId },
+        { $set: { invoice: invoice._id } },
+        { session }
+      );
+    } else if (!skipPaymentEntry) {
+      await PaymentReceived.create(
+        [
+          {
+            tenantId: req.tenantId,
+            project: invoice.project,
+            clientName: invoice.client.name,
+            invoice: invoice._id,
+            amount: paymentAmount,
+            date: paymentDate,
+            paymentMode: mode || "bank",
+            reference,
+            milestone: invoice.milestone || (invoice.recurring && invoice.recurring.milestone),
+            notes,
+            recordedBy: req.user._id,
+          },
+        ],
+        { session }
+      );
+    }
 
     await session.commitTransaction();
     session.endSession();
 
-    await invoice.populate("project", "name location").populate("createdBy", "name");
+    // Populate outside the transaction — failure here doesn't affect saved data
+    try {
+      await invoice.populate("project", "name location").populate("createdBy", "name");
+    } catch { /* non-critical, return unpopulated */ }
+
     res.json({ success: true, message: "Payment recorded.", data: invoice });
   } catch (err) {
-    await session.abortTransaction();
+    // Only abort if the transaction hasn't been committed yet
+    try { await session.abortTransaction(); } catch { /* already committed or ended */ }
     session.endSession();
     next(err);
   }
@@ -633,6 +647,17 @@ const getInvoiceSummary = async (req, res, next) => {
   }
 };
 
+// DELETE /api/invoices/:id  (admin only, blocks if fully paid)
+const deleteInvoice = async (req, res, next) => {
+  try {
+    const invoice = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenantId });
+    if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found." });
+    if (invoice.status === "paid") return res.status(400).json({ success: false, message: "Cannot delete a fully paid invoice." });
+    await invoice.deleteOne();
+    res.json({ success: true, message: "Invoice deleted." });
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getInvoices,
   getInvoice,
@@ -641,4 +666,5 @@ module.exports = {
   updateInvoice,
   recordPayment,
   getInvoiceSummary,
+  deleteInvoice,
 };
