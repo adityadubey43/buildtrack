@@ -64,7 +64,7 @@ function calculateInvoiceTotals({
     quantity: Number(item.quantity),
     rate: Number(item.rate),
     amount: Number(item.quantity) * Number(item.rate),
-    gstRate: Number(item.gstRate) || 18,
+    gstRate: item.gstRate != null ? Number(item.gstRate) : 18,
   }));
 
   // 2. Subtotal
@@ -334,7 +334,7 @@ const createInvoice = async (req, res, next) => {
         unit: item.unit || "nos",
         quantity: Number(item.quantity),
         rate: Number(item.rate),
-        gstRate: Number(item.gstRate) || 18,
+        gstRate: item.gstRate != null ? Number(item.gstRate) : 18,
       })),
       discountType: discountType || "none",
       discountValue: Number(discountValue) || 0,
@@ -383,7 +383,7 @@ const createInvoice = async (req, res, next) => {
       recurring: recurring || { type: "one-time" },
       milestone: milestone || (recurring && recurring.milestone) || undefined,
       // Backward-compat gstRate — use first item's rate or 18
-      gstRate: invoiceItems[0] ? (Number(invoiceItems[0].gstRate) || 18) : 18,
+      gstRate: invoiceItems[0] ? (invoiceItems[0].gstRate != null ? Number(invoiceItems[0].gstRate) : 18) : 18,
       // Content
       terms: terms || (tenant.invoiceSettings && tenant.invoiceSettings.defaultTerms) || undefined,
       notes,
@@ -479,7 +479,7 @@ const updateInvoice = async (req, res, next) => {
           unit: item.unit || "nos",
           quantity: Number(item.quantity),
           rate: Number(item.rate),
-          gstRate: Number(item.gstRate) || 18,
+          gstRate: item.gstRate != null ? Number(item.gstRate) : 18,
         })),
         discountType: discountType !== undefined ? discountType : invoice.discountType,
         discountValue: discountValue !== undefined ? Number(discountValue) : invoice.discountValue,
