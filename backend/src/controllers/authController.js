@@ -14,6 +14,7 @@ function userPayload(user, tenant) {
     tenantId: user.tenantId,
     slug: tenant.slug,
     companyName: tenant.companyName,
+    logo: tenant.logo || null,
     plan: tenant.plan,
     planStatus: tenant.planStatus,
     trialEndsAt: tenant.trialEndsAt,
@@ -239,4 +240,23 @@ const updateInvoiceSettings = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { signup, login, getMe, forgotPassword, resetPassword, changePassword, getCompanyBySlug, getInvoiceSettings, updateInvoiceSettings };
+// PUT /api/auth/company
+const updateCompanyProfile = async (req, res, next) => {
+  try {
+    const { logo } = req.body;
+    const update = {};
+    if (typeof logo !== "undefined") update.logo = logo;
+
+    const tenant = await Tenant.findOneAndUpdate(
+      { tenantId: req.tenantId },
+      { $set: update },
+      { new: true }
+    );
+    if (!tenant) return res.status(404).json({ success: false, message: "Tenant not found." });
+
+    const user = await User.findById(req.user._id);
+    res.json({ success: true, user: userPayload(user, tenant) });
+  } catch (err) { next(err); }
+};
+
+module.exports = { signup, login, getMe, forgotPassword, resetPassword, changePassword, getCompanyBySlug, getInvoiceSettings, updateInvoiceSettings, updateCompanyProfile };

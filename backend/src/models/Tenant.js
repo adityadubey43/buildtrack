@@ -43,7 +43,8 @@ const tenantSchema = new mongoose.Schema(
       ifsc: { type: String },
       accountHolder: { type: String },
       upiId: { type: String },
-      signature: { type: String }, // URL
+      logo: { type: String },      // base64 data URL or hosted URL for invoice header
+      signature: { type: String }, // base64 data URL or hosted URL
       defaultTerms: { type: String },
       defaultPaymentInstructions: { type: String },
     },

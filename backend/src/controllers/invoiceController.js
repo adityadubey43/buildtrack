@@ -164,7 +164,7 @@ function buildCompanySnapshot(tenant) {
     stateCode: s.stateCode,
     phone: tenant.phone,
     email: s.email,
-    logo: tenant.logo,
+    logo: s.logo || tenant.logo,
     bankName: s.bankName,
     accountNumber: s.accountNumber,
     ifsc: s.ifsc,
