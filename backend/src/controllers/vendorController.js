@@ -14,10 +14,11 @@ const getVendors = async (req, res, next) => {
 // POST /api/vendors
 const createVendor = async (req, res, next) => {
   try {
-    const { name, phone, gstNumber, address, notes } = req.body;
+    const { phone, gstNumber, address, notes } = req.body;
+    const name = (req.body.name || "").trim();
     if (!name) return res.status(400).json({ success: false, message: "Vendor name is required." });
 
-    const exists = await Vendor.findOne({ tenantId: req.tenantId, name: name.trim() });
+    const exists = await Vendor.findOne({ tenantId: req.tenantId, name: { $regex: `^${name}$`, $options: "i" } });
     if (exists) return res.status(409).json({ success: false, message: "A vendor with this name already exists.", data: exists });
 
     const vendor = await Vendor.create({ tenantId: req.tenantId, name, phone, gstNumber, address, notes });
@@ -159,24 +160,25 @@ const migrateVendorStrings = async (req, res, next) => {
   try {
     const expenses = await Expense.find({ tenantId: req.tenantId, vendor: { $exists: true, $ne: "" }, vendorId: null });
 
-    const nameMap = new Map();
-    for (const e of expenses) {
-      if (e.vendor && !nameMap.has(e.vendor)) nameMap.set(e.vendor, null);
-    }
-
+    // Build a map of lowercase name → canonical vendor id
+    const nameMap = new Map(); // lowercase key → vendor _id
     let created = 0, linked = 0;
-    for (const [name] of nameMap) {
-      let v = await Vendor.findOne({ tenantId: req.tenantId, name });
-      if (!v) { v = await Vendor.create({ tenantId: req.tenantId, name }); created++; }
-      nameMap.set(name, v._id);
+
+    for (const e of expenses) {
+      if (!e.vendor) continue;
+      const key = e.vendor.trim().toLowerCase();
+      if (nameMap.has(key)) continue;
+
+      // Case-insensitive lookup so "Sarwan ram" and "Sarwan Ram" resolve to same doc
+      let v = await Vendor.findOne({ tenantId: req.tenantId, name: { $regex: `^${e.vendor.trim()}$`, $options: "i" } });
+      if (!v) { v = await Vendor.create({ tenantId: req.tenantId, name: e.vendor.trim() }); created++; }
+      nameMap.set(key, v._id);
     }
 
     for (const e of expenses) {
-      if (e.vendor && nameMap.get(e.vendor)) {
-        e.vendorId = nameMap.get(e.vendor);
-        await e.save();
-        linked++;
-      }
+      if (!e.vendor) continue;
+      const vendorId = nameMap.get(e.vendor.trim().toLowerCase());
+      if (vendorId) { e.vendorId = vendorId; await e.save(); linked++; }
     }
 
     res.json({ success: true, message: `Migration done. Created ${created} vendors, linked ${linked} expense payments.` });
