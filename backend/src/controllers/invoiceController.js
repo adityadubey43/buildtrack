@@ -28,10 +28,10 @@ function parseBodyArray(value) {
  * tenant.  We count existing invoices (including cancelled/draft) so numbers
  * never repeat even after deletion.
  */
-async function nextInvoiceNumber(tenantId) {
-  const count = await Invoice.countDocuments({ tenantId });
+async function nextInvoiceNumber(tenantId, prefix = "INV") {
+  const count = await Invoice.countDocuments({ tenantId, invoiceNumber: { $regex: `^${prefix}-` } });
   const seq = String(count + 1).padStart(3, "0");
-  return `INV-${seq}`;
+  return `${prefix}-${seq}`;
 }
 
 /**
@@ -325,10 +325,7 @@ const createInvoice = async (req, res, next) => {
       if (proj) projectName = proj.name;
     }
 
-    // --- Auto-generate invoice number if not provided ---
-    const invoiceNumber = providedInvoiceNumber || (await nextInvoiceNumber(req.tenantId));
-
-    // --- Calculate all financials ---
+    // --- Calculate all financials first (needed to decide invoice number prefix) ---
     const parsedAdditionalCharges = parseBodyArray(additionalCharges) || [];
     const calc = calculateInvoiceTotals({
       items: invoiceItems.map((item) => ({
@@ -345,6 +342,10 @@ const createInvoice = async (req, res, next) => {
       tdsRate: Number(tdsRate) || 0,
       gstType,
     });
+
+    // --- Auto-generate invoice number (BILL- prefix for zero-tax invoices) ---
+    const isNonGst = calc.totalTax === 0;
+    const invoiceNumber = providedInvoiceNumber || (await nextInvoiceNumber(req.tenantId, isNonGst ? "BILL" : "INV"));
 
     // --- Build company snapshot ---
     const company = buildCompanySnapshot(tenant);
