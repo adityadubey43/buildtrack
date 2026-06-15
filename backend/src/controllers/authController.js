@@ -15,6 +15,10 @@ function userPayload(user, tenant) {
     slug: tenant.slug,
     companyName: tenant.companyName,
     logo: tenant.logo || null,
+    phone: tenant.phone || null,
+    address: tenant.address || null,
+    gstNumber: tenant.gstNumber || null,
+    pan: tenant.invoiceSettings?.pan || null,
     plan: tenant.plan,
     planStatus: tenant.planStatus,
     trialEndsAt: tenant.trialEndsAt,
@@ -243,13 +247,20 @@ const updateInvoiceSettings = async (req, res, next) => {
 // PUT /api/auth/company
 const updateCompanyProfile = async (req, res, next) => {
   try {
-    const { logo } = req.body;
-    const update = {};
-    if (typeof logo !== "undefined") update.logo = logo;
+    const { logo, companyName, phone, address, gstNumber, pan } = req.body;
+    const tenantUpdate = {};
+    if (typeof logo        !== "undefined") tenantUpdate.logo        = logo;
+    if (typeof companyName !== "undefined" && companyName.trim()) tenantUpdate.companyName = companyName.trim();
+    if (typeof phone       !== "undefined") tenantUpdate.phone       = phone;
+    if (typeof address     !== "undefined") tenantUpdate.address     = address;
+    if (typeof gstNumber   !== "undefined") tenantUpdate.gstNumber   = gstNumber;
+
+    const update = { $set: tenantUpdate };
+    if (typeof pan !== "undefined") update.$set["invoiceSettings.pan"] = pan;
 
     const tenant = await Tenant.findOneAndUpdate(
       { tenantId: req.tenantId },
-      { $set: update },
+      update,
       { new: true }
     );
     if (!tenant) return res.status(404).json({ success: false, message: "Tenant not found." });
