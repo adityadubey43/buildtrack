@@ -26,6 +26,15 @@ const createVendor = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// DELETE /api/vendors/:id
+const deleteVendor = async (req, res, next) => {
+  try {
+    const vendor = await Vendor.findOneAndDelete({ _id: req.params.id, tenantId: req.tenantId });
+    if (!vendor) return res.status(404).json({ success: false, message: "Vendor not found." });
+    res.json({ success: true, message: "Vendor deleted." });
+  } catch (err) { next(err); }
+};
+
 // PUT /api/vendors/:id
 const updateVendor = async (req, res, next) => {
   try {
@@ -186,7 +195,7 @@ const migrateVendorStrings = async (req, res, next) => {
 };
 
 module.exports = {
-  getVendors, createVendor, updateVendor,
+  getVendors, createVendor, updateVendor, deleteVendor,
   addVendorBill, deleteVendorBill,
   getVendorLedger, getVendorsSummary,
   migrateVendorStrings,
