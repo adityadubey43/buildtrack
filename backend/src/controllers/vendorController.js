@@ -132,6 +132,10 @@ const migrateVendorStrings = async (req, res, next) => {
     for (const e of expenses) {
       if (e.vendor && nameMap.get(e.vendor)) {
         e.vendorId = nameMap.get(e.vendor);
+        // Old expenses were already paid — treat full amount as paid
+        if (!e.paidAmount || e.paidAmount === 0) {
+          e.paidAmount = e.amount;
+        }
         await e.save();
         linked++;
       }
