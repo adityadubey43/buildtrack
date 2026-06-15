@@ -2,10 +2,12 @@ const mongoose = require("mongoose");
 
 const phaseSchema = new mongoose.Schema({
   name: { type: String, required: true },
+  weight: { type: Number, default: 0, min: 0, max: 100 }, // % contribution to overall progress
   completionPct: { type: Number, default: 0, min: 0, max: 100 },
   startDate: { type: Date },
   endDate: { type: Date },
   isCompleted: { type: Boolean, default: false },
+  completedAt: { type: Date },
 });
 
 const milestoneSchema = new mongoose.Schema({

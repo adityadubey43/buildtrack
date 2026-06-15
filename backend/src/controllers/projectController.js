@@ -109,6 +109,45 @@ const updatePhase = async (req, res, next) => {
   }
 };
 
+// PUT /api/projects/:id/stages  — replace full stages array, auto-calc overallProgress
+const updateStages = async (req, res, next) => {
+  try {
+    const project = await Project.findOne({ _id: req.params.id, tenantId: req.tenantId });
+    if (!project) return res.status(404).json({ success: false, message: "Project not found." });
+
+    const stages = req.body.stages || [];
+
+    // Preserve completedAt timestamp
+    const existingMap = {};
+    for (const p of project.phases) {
+      if (p._id) existingMap[p._id.toString()] = p;
+    }
+
+    project.phases = stages.map((s) => {
+      const existing = s._id && existingMap[s._id];
+      const wasCompleted = existing ? existing.isCompleted : false;
+      const nowCompleted = !!s.isCompleted;
+      return {
+        _id: s._id || undefined,
+        name: s.name,
+        weight: Number(s.weight) || 0,
+        isCompleted: nowCompleted,
+        completionPct: nowCompleted ? 100 : 0,
+        completedAt: nowCompleted && !wasCompleted ? new Date() : (existing?.completedAt || null),
+      };
+    });
+
+    // overallProgress = sum of weights of completed stages
+    project.overallProgress = Math.min(
+      100,
+      Math.round(project.phases.filter((p) => p.isCompleted).reduce((s, p) => s + p.weight, 0))
+    );
+
+    await project.save();
+    res.json({ success: true, data: project });
+  } catch (err) { next(err); }
+};
+
 // DELETE /api/projects/:id
 const deleteProject = async (req, res, next) => {
   try {
@@ -136,4 +175,4 @@ const getProjectStats = async (req, res, next) => {
   }
 };
 
-module.exports = { getProjects, getProject, createProject, updateProject, updatePhase, deleteProject, getProjectStats };
+module.exports = { getProjects, getProject, createProject, updateProject, updatePhase, updateStages, deleteProject, getProjectStats };
